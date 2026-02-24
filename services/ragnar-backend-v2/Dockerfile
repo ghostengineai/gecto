@@ -21,7 +21,16 @@ RUN git clone https://github.com/ggerganov/whisper.cpp.git /tmp/whisper.cpp \
   && (cp build/bin/main /opt/whispercpp/main || true) \
   && (find /tmp/whisper.cpp -type f -name 'libwhisper.so*' -exec cp -v {} /opt/whispercpp/lib/ \; || true) \
   && (find /tmp/whisper.cpp -type f -name 'libggml*.so*' -exec cp -v {} /opt/whispercpp/lib/ \; || true) \
-  && (cd /opt/whispercpp/lib && (ls -la || true) && (ln -sf libwhisper.so.* libwhisper.so.1 || true))
+  && (cd /opt/whispercpp/lib \
+        && (ls -la || true) \
+        && (ln -sf libwhisper.so.* libwhisper.so.1 || true) \
+        && (ln -sf libggml.so.* libggml.so.0 || true) \
+        && (ln -sf libggml-base.so.* libggml-base.so.0 || true) \
+        && (ln -sf libggml-cpu.so.* libggml-cpu.so.0 || true) \
+        && (ln -sf libggml-metal.so.* libggml-metal.so.0 || true) \
+        && (ln -sf libggml-blas.so.* libggml-blas.so.0 || true) \
+        && (ln -sf libggml-cuda.so.* libggml-cuda.so.0 || true) \
+        && (ln -sf libggml-vulkan.so.* libggml-vulkan.so.0 || true))
 
 # Install piper binary (release build)
 # Note: this fetches a pinned release asset. If it breaks, use your own piper build and set PIPER_BIN.
