@@ -1,0 +1,14 @@
+{
+  "chunk_ms": 200,
+  "window_ms": 1600,
+  "overlap_ms": 300,
+  "twilio_sample_rate": 8000,
+  "normalized_sample_rate": 16000,
+  "metrics": ["T_first_partial_ms", "T_final_ms", "WER", "CER", "RT_factor", "partial_stability"],
+  "test_sets": {
+    "studio": 10,
+    "phone": 10,
+    "noisy": 10,
+    "conversational": 10
+  }
+}
