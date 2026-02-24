@@ -45,10 +45,13 @@ COPY --from=build /opt/piper /opt/piper
 COPY --from=build /app/services/ragnar-backend-v2/dist ./dist
 COPY --from=build /app/services/ragnar-backend-v2/node_modules ./node_modules
 COPY --from=build /app/services/ragnar-backend-v2/package.json ./package.json
+# Needed for downloading models onto the Render persistent disk at runtime
+COPY --from=build /app/services/ragnar-backend-v2/scripts ./scripts
 
 # Render injects PORT; we should not override it here.
 ENV WHISPER_CPP_BIN=/opt/whispercpp/main \
     PIPER_BIN=/opt/piper/piper \
     FFMPEG_BIN=ffmpeg
 
-CMD ["node", "dist/server.js"]
+# On first boot, download models onto the persistent disk (if mounted at /var/data).
+CMD ["bash", "-lc", "node scripts/fetch-models.mjs && node dist/server.js"]
