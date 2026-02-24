@@ -44,9 +44,11 @@ export default function Home() {
     try {
       const tokenResp = await fetch('/api/realtime-token', { method: 'POST' });
       if (!tokenResp.ok) {
-        throw new Error(`Token endpoint failed (${tokenResp.status})`);
+        const errorBody = await tokenResp.text();
+        throw new Error(`Token endpoint failed (${tokenResp.status}): ${errorBody}`);
       }
       const session: SessionResponse = await tokenResp.json();
+      console.log('Realtime session response', session);
       const ephemeralKey =
         typeof session?.client_secret === 'object' && session.client_secret?.value
           ? session.client_secret.value
@@ -116,7 +118,8 @@ export default function Home() {
       });
 
       if (!apiResponse.ok) {
-        throw new Error(`Realtime connect error (${apiResponse.status})`);
+        const errorBody = await apiResponse.text();
+        throw new Error(`Realtime connect error (${apiResponse.status}): ${errorBody}`);
       }
 
       const answer = await apiResponse.text();
