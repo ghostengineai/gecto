@@ -93,7 +93,7 @@ twilioRouter.post(
     const connect = response.connect();
     connect.stream({
       url: streamUrl.toString(),
-      track: "inbound_track",
+      track: "both_tracks",
     });
 
     res.type("text/xml").send(response.toString());
