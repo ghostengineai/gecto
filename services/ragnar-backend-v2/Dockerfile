@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/*
 
 # Build whisper.cpp
+# NOTE: whisper.cpp CLI flags are not fully stable across commits. Prefer pinning WHISPER_CPP_REF.
 ARG WHISPER_CPP_REF=master
 RUN git clone https://github.com/ggerganov/whisper.cpp.git /tmp/whisper.cpp \
   && cd /tmp/whisper.cpp \

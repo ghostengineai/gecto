@@ -66,6 +66,20 @@ app.get("/healthz", async (_req, res) => {
   });
 });
 
+// Stronger than /healthz: actually runs whisper.cpp on a short silent buffer.
+app.get("/selftest/asr", async (_req, res) => {
+  try {
+    const pcm16Silence = Buffer.alloc(16000 * 2); // 1s @ 16kHz, mono, s16le
+    const r = await asr.transcribePcm16kMono(pcm16Silence);
+    res.json({ ok: true, text: r.text });
+  } catch (e) {
+    res.status(500).json({
+      ok: false,
+      error: e instanceof Error ? e.message : String(e),
+    });
+  }
+});
+
 const server = createServer(app);
 const wss = new WebSocketServer({ server, path: "/relay" });
 

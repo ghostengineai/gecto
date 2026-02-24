@@ -63,9 +63,40 @@ export class WhisperCppAsr implements AsrModule {
       const elapsedMs = Date.now() - started;
 
       if (res.code !== 0) {
+        const stdoutPreview = (res.stdout ?? "").slice(0, 800);
         const stderrPreview = (res.stderr ?? "").slice(0, 800);
-        log.warn("whisper.cpp exited non-zero", { code: res.code, stderr: stderrPreview });
-        throw new Error(`whisper.cpp failed (code ${res.code}): ${stderrPreview || "(no stderr)"}`);
+        log.warn("whisper.cpp exited non-zero", {
+          code: res.code,
+          stdout: stdoutPreview,
+          stderr: stderrPreview,
+        });
+
+        // Fallback: some whisper.cpp builds don't support JSON output flags; try text output.
+        // Use flags that have historically been common: -otxt (text), -of (output base), -nt (no timestamps).
+        const argsTxt = [
+          "-m",
+          this.opts.modelPath,
+          "-f",
+          wavPath,
+          "-otxt",
+          "-of",
+          outBase,
+          "-nt",
+        ];
+
+        const res2 = await execFile(this.opts.binPath, argsTxt, { timeoutMs: 120_000 });
+        if (res2.code !== 0) {
+          const stdout2 = (res2.stdout ?? "").slice(0, 800);
+          const stderr2 = (res2.stderr ?? "").slice(0, 800);
+          throw new Error(
+            `whisper.cpp failed (code ${res.code}). stdout=${stdoutPreview || "(empty)"} stderr=${stderrPreview || "(empty)"}. ` +
+              `Fallback -otxt also failed (code ${res2.code}). stdout=${stdout2 || "(empty)"} stderr=${stderr2 || "(empty)"}`,
+          );
+        }
+
+        const txtPath = `${outBase}.txt`;
+        const text = String(await fs.readFile(txtPath, "utf8")).trim();
+        return { text };
       }
 
       const jsonRaw = await fs.readFile(outJson, "utf8");
