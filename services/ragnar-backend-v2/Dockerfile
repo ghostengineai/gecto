@@ -16,9 +16,11 @@ RUN git clone https://github.com/ggerganov/whisper.cpp.git /tmp/whisper.cpp \
   && git checkout ${WHISPER_CPP_REF} \
   && cmake -S . -B build -DWHISPER_BUILD_TESTS=OFF \
   && cmake --build build -j \
-  && mkdir -p /opt/whispercpp \
+  && mkdir -p /opt/whispercpp/lib \
   && (cp build/bin/whisper-cli /opt/whispercpp/whisper-cli || true) \
-  && (cp build/bin/main /opt/whispercpp/main || true)
+  && (cp build/bin/main /opt/whispercpp/main || true) \
+  && (find build -maxdepth 4 -type f -name 'libwhisper.so*' -exec cp -v {} /opt/whispercpp/lib/ \; || true) \
+  && (find build -maxdepth 6 -type f -name 'libggml*.so*' -exec cp -v {} /opt/whispercpp/lib/ \; || true)
 
 # Install piper binary (release build)
 # Note: this fetches a pinned release asset. If it breaks, use your own piper build and set PIPER_BIN.
@@ -52,6 +54,7 @@ COPY --from=build /app/services/ragnar-backend-v2/scripts ./scripts
 
 # Render injects PORT; we should not override it here.
 ENV WHISPER_CPP_BIN=/opt/whispercpp/whisper-cli \
+    LD_LIBRARY_PATH=/opt/whispercpp/lib \
     PIPER_BIN=/opt/piper/piper \
     FFMPEG_BIN=ffmpeg
 
