@@ -35,6 +35,7 @@ const RELAY_OUTPUT_SAMPLE_RATE = Number(process.env.NEXT_PUBLIC_RELAY_OUTPUT_SAM
 const RELAY_CHUNK_MS = Number(process.env.NEXT_PUBLIC_RELAY_CHUNK_MS ?? 20);
 const COMMIT_SILENCE_MS = Number(process.env.NEXT_PUBLIC_COMMIT_SILENCE_MS ?? 900);
 const VAD_THRESHOLD = Number(process.env.NEXT_PUBLIC_VAD_THRESHOLD ?? 0.012);
+const MIN_COMMIT_DURATION_MS = Number(process.env.NEXT_PUBLIC_MIN_COMMIT_MS ?? 100);
 
 export default function Home() {
   const [status, setStatus] = useState<CallStatus>('idle');
@@ -54,10 +55,15 @@ export default function Home() {
   const assistantScratchRef = useRef('');
   const silenceMsRef = useRef(0);
   const hasPendingSpeechRef = useRef(false);
+  const speechSamplesRef = useRef(0);
   const streamingActiveRef = useRef(false);
 
   const chunkSize = useMemo(
     () => Math.max(1, Math.round((RELAY_INPUT_SAMPLE_RATE / 1000) * RELAY_CHUNK_MS)),
+    [],
+  );
+  const minCommitSamples = useMemo(
+    () => Math.max(1, Math.round((RELAY_INPUT_SAMPLE_RATE / 1000) * MIN_COMMIT_DURATION_MS)),
     [],
   );
 
@@ -92,6 +98,9 @@ export default function Home() {
 
   const dispatchToRelay = (message: RelayClientMessage) => {
     const socket = socketRef.current;
+    if (message.type === 'commit' && !hasPendingSpeechRef.current) {
+      return;
+    }
     if (!socket || socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
       return;
     }
@@ -176,15 +185,17 @@ export default function Home() {
     if (rms >= VAD_THRESHOLD) {
       hasPendingSpeechRef.current = true;
       silenceMsRef.current = 0;
+      speechSamplesRef.current += chunk.length;
       return;
     }
     if (!hasPendingSpeechRef.current) {
       return;
     }
     silenceMsRef.current += chunkDurationMs;
-    if (silenceMsRef.current >= COMMIT_SILENCE_MS) {
+    if (silenceMsRef.current >= COMMIT_SILENCE_MS && speechSamplesRef.current >= minCommitSamples) {
       hasPendingSpeechRef.current = false;
       silenceMsRef.current = 0;
+      speechSamplesRef.current = 0;
       dispatchToRelay({ type: 'commit' });
     }
   };
@@ -214,6 +225,7 @@ export default function Home() {
     playbackOffsetRef.current = 0;
     silenceMsRef.current = 0;
     hasPendingSpeechRef.current = false;
+    speechSamplesRef.current = 0;
 
     if (socketRef.current) {
       try {

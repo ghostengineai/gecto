@@ -31,6 +31,7 @@ Set `NEXT_PUBLIC_VOICE_RELAY_URL` (or rely on the default `ws://localhost:5050/r
 | `NEXT_PUBLIC_RELAY_CHUNK_MS` | client (optional) | Size of PCM chunks forwarded to relay (default `20` ms) |
 | `NEXT_PUBLIC_VAD_THRESHOLD` | client (optional) | RMS threshold for detecting speech (default `0.012`) |
 | `NEXT_PUBLIC_COMMIT_SILENCE_MS` | client (optional) | Silence duration before auto `commit` (default `900` ms) |
+| `NEXT_PUBLIC_MIN_COMMIT_MS` | client (optional) | Minimum audio duration (ms) required before sending a commit (default `100`) |
 | `BASIC_AUTH_USERNAME` | edge (middleware) | Username required to load the app |
 | `BASIC_AUTH_PASSWORD` | edge (middleware) | Password required to load the app |
 
