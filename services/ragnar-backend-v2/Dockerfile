@@ -46,10 +46,9 @@ COPY --from=build /app/services/ragnar-backend-v2/dist ./dist
 COPY --from=build /app/services/ragnar-backend-v2/node_modules ./node_modules
 COPY --from=build /app/services/ragnar-backend-v2/package.json ./package.json
 
-ENV RAGNAR_BACKEND_V2_PORT=5052 \
-    WHISPER_CPP_BIN=/opt/whispercpp/main \
+# Render injects PORT; we should not override it here.
+ENV WHISPER_CPP_BIN=/opt/whispercpp/main \
     PIPER_BIN=/opt/piper/piper \
     FFMPEG_BIN=ffmpeg
 
-EXPOSE 5052
 CMD ["node", "dist/server.js"]
