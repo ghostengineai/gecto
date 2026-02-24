@@ -6,7 +6,7 @@ const DEFAULT_REALTIME_MODEL =
   process.env.NEXT_PUBLIC_OPENAI_REALTIME_MODEL ?? 'gpt-4o-realtime-preview-2024-12-17';
 const DEFAULT_CONNECT_URL =
   process.env.NEXT_PUBLIC_OPENAI_REALTIME_CONNECT_URL ??
-  'https://api.openai.com/v1/realtime/sessions';
+  'https://api.openai.com/v1/realtime';
 
 type SessionResponse = {
   client_secret?: { value: string } | null;
@@ -65,7 +65,7 @@ export default function Home() {
       if (!sessionId) {
         throw new Error('No session id returned by token endpoint');
       }
-      const connectUrl = new URL(`${connectUrlBase}/${sessionId}/connect`);
+      const connectUrl = new URL(connectUrlBase);
       connectUrl.searchParams.set('model', targetModel);
 
       const pc = new RTCPeerConnection({
@@ -114,6 +114,7 @@ export default function Home() {
           Authorization: `Bearer ${ephemeralKey}`,
           'Content-Type': 'application/sdp',
           'OpenAI-Beta': 'realtime=v1',
+          'OpenAI-Session-ID': sessionId,
         },
         body: offer.sdp ?? '',
       });
