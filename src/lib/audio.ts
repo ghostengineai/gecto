@@ -58,9 +58,7 @@ export function base64ToFloat32(payload: string): Float32Array {
 }
 
 export function cloneFloat32(samples: Float32Array): Float32Array {
-  const clone = new Float32Array(samples.length);
-  clone.set(samples);
-  return clone;
+  return new Float32Array(Array.from(samples));
 }
 
 export function concatInt16(first: Int16Array, second: Int16Array): Int16Array {
