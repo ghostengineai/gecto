@@ -2,6 +2,8 @@ import WebSocket, { RawData } from "ws";
 import { v4 as uuid } from "uuid";
 import { decodeMuLaw, resampleLinear, int16ToBase64, encodeMuLaw, base64ToInt16, computeRms } from "./audio";
 import type { BridgeConfig, OutboundPlan, TwilioEvent, TwilioMediaEvent, TwilioStartEvent, TwilioDtmfEvent } from "./types";
+import { log } from "./util/log";
+import { createTrace, mark, msSinceStart, type Trace } from "./util/trace";
 
 const TWILIO_SAMPLE_RATE = 8000;
 const TWILIO_FRAME_MS = 20;
@@ -10,6 +12,7 @@ const TWILIO_FRAME_SAMPLES = (TWILIO_SAMPLE_RATE / 1000) * TWILIO_FRAME_MS; // 1
 export type BridgeSession = {
   streamSid: string;
   callSid: string;
+  trace: Trace;
   twilioSocket: WebSocket;
   relaySocket?: WebSocket;
   relayId?: string;
@@ -47,7 +50,10 @@ export class PhoneBridgeManager {
         const payload = JSON.parse(data.toString()) as TwilioEvent;
         this.routeTwilioEvent(ws, payload);
       } catch (error) {
-        console.error("[phone-bridge] failed to parse Twilio payload", error);
+        log.warn("twilio payload parse failed", {
+          component: "phone-bridge",
+          err: error instanceof Error ? error.message : String(error),
+        });
       }
     });
 
@@ -59,7 +65,10 @@ export class PhoneBridgeManager {
     });
 
     ws.on("error", (err) => {
-      console.error("[phone-bridge] Twilio socket error", err);
+      log.warn("twilio socket error", {
+        component: "phone-bridge",
+        err: err instanceof Error ? err.message : String(err),
+      });
       const session = this.findSessionBySocket(ws);
       if (session) {
         this.teardown(session.streamSid, "twilio_error");
@@ -74,13 +83,13 @@ export class PhoneBridgeManager {
     }
 
     if (!isStreamEvent(event)) {
-      console.warn("[phone-bridge] Received streamless event", event.event);
+      log.warn("streamless twilio event", { component: "phone-bridge", event: event.event });
       return;
     }
 
     const session = this.sessions.get(event.streamSid);
     if (!session) {
-      console.warn("[phone-bridge] Received event for unknown stream", event.streamSid);
+      log.warn("event for unknown stream", { component: "phone-bridge", streamSid: event.streamSid, event: event.event });
       return;
     }
 
@@ -104,15 +113,18 @@ export class PhoneBridgeManager {
   private startSession(ws: WebSocket, event: TwilioStartEvent) {
     const { streamSid, callSid } = event.start;
     if (this.sessions.has(streamSid)) {
-      console.warn("[phone-bridge] stream already exists", streamSid);
+      log.warn("stream already exists", { component: "phone-bridge", streamSid, callSid });
       return;
     }
 
+    const trace = createTrace(callSid);
+    mark(trace, "twilio_start");
     const outboundPlan = this.outboundPlans.get(callSid);
 
     const session: BridgeSession = {
       streamSid,
       callSid,
+      trace,
       twilioSocket: ws,
       relayReady: false,
       relaySendQueue: [],
@@ -128,7 +140,14 @@ export class PhoneBridgeManager {
     };
 
     this.sessions.set(streamSid, session);
-    console.log(`[phone-bridge] start call ${callSid} (${streamSid})`);
+    log.info("call started", {
+      component: "phone-bridge",
+      traceId: trace.traceId,
+      stage: "twilio_start",
+      ms: msSinceStart(trace),
+      callSid,
+      streamSid,
+    });
     this.connectRelay(session);
   }
 
@@ -138,7 +157,26 @@ export class PhoneBridgeManager {
     session.relayId = uuid();
 
     relay.on("open", () => {
-      console.log(`[phone-bridge] relay socket ready for stream ${session.streamSid}`);
+      mark(session.trace, "relay_ws_open");
+      log.info("relay ws open", {
+        component: "phone-bridge",
+        traceId: session.trace.traceId,
+        stage: "relay_ws_open",
+        ms: msSinceStart(session.trace),
+        streamSid: session.streamSid,
+      });
+
+      // Backwards-compatible: servers not expecting this can ignore it.
+      this.dispatchToRelay(
+        session,
+        JSON.stringify({
+          type: "start",
+          traceId: session.trace.traceId,
+          callSid: session.callSid,
+          streamSid: session.streamSid,
+          startedAt: session.trace.startedAt,
+        }),
+      );
     });
 
     relay.on("message", (data: RawData) => {
@@ -162,7 +200,13 @@ export class PhoneBridgeManager {
             return "(unprintable)";
           }
         })();
-        console.error("[phone-bridge] failed to parse relay payload", { err: error, preview });
+
+        log.warn("relay payload parse failed", {
+          component: "phone-bridge",
+          traceId: session.trace.traceId,
+          err: error instanceof Error ? error.message : String(error),
+          preview,
+        });
       }
     });
 
@@ -177,7 +221,11 @@ export class PhoneBridgeManager {
     });
 
     relay.on("error", (error) => {
-      console.error("[phone-bridge] relay error", error);
+      log.warn("relay ws error", {
+        component: "phone-bridge",
+        traceId: session.trace.traceId,
+        err: error instanceof Error ? error.message : String(error),
+      });
       this.teardown(session.streamSid, "relay_error");
     });
   }
@@ -186,6 +234,14 @@ export class PhoneBridgeManager {
     switch (payload.type) {
       case "ready":
         session.relayReady = true;
+        mark(session.trace, "relay_ready");
+        log.info("relay ready", {
+          component: "phone-bridge",
+          traceId: session.trace.traceId,
+          stage: "relay_ready",
+          ms: msSinceStart(session.trace),
+          streamSid: session.streamSid,
+        });
         this.flushQueue(session);
 
         // Outbound: speak first when we have an opener.
@@ -204,9 +260,22 @@ export class PhoneBridgeManager {
         break;
       case "response_completed":
         session.outgoingMuLawBuffer = Buffer.alloc(0);
+        log.info("response completed", {
+          component: "phone-bridge",
+          traceId: session.trace.traceId,
+          stage: "relay_response_completed",
+          ms: msSinceStart(session.trace),
+          streamSid: session.streamSid,
+          responseId: payload.responseId,
+        });
         break;
       case "error":
-        console.error(`[phone-bridge] relay error for ${session.streamSid}:`, payload.error);
+        log.warn("relay error", {
+          component: "phone-bridge",
+          traceId: session.trace.traceId,
+          streamSid: session.streamSid,
+          err: String(payload.error ?? "unknown"),
+        });
         break;
       default:
         break;
@@ -292,6 +361,7 @@ export class PhoneBridgeManager {
     const relayPayload = JSON.stringify({
       type: "audio_chunk",
       audio: int16ToBase64(samples),
+      traceId: session.trace.traceId,
     });
     this.dispatchToRelay(session, relayPayload);
   }
@@ -299,15 +369,24 @@ export class PhoneBridgeManager {
   private commit(session: BridgeSession, reason: string, instructions?: string) {
     session.hasPendingAudio = false;
     session.silenceMs = 0;
+
+    mark(session.trace, `commit_${reason}`);
     this.dispatchToRelay(
       session,
-      JSON.stringify({ type: "commit", reason, instructions }),
+      JSON.stringify({ type: "commit", traceId: session.trace.traceId, reason, instructions }),
     );
-    console.log(`[phone-bridge] commit (${reason}) for stream ${session.streamSid}`);
+    log.info("commit", {
+      component: "phone-bridge",
+      traceId: session.trace.traceId,
+      stage: "commit",
+      ms: msSinceStart(session.trace),
+      streamSid: session.streamSid,
+      reason,
+    });
   }
 
   private interruptRelay(session: BridgeSession) {
-    this.dispatchToRelay(session, JSON.stringify({ type: "end" }));
+    this.dispatchToRelay(session, JSON.stringify({ type: "end", traceId: session.trace.traceId }));
   }
 
   private dispatchToRelay(session: BridgeSession, payload: string) {
@@ -330,7 +409,17 @@ export class PhoneBridgeManager {
     const session = this.sessions.get(streamSid);
     if (!session) return;
 
-    console.log(`[phone-bridge] closing stream ${streamSid} (${reason})`);
+    log.info("teardown", {
+      component: "phone-bridge",
+      traceId: session.trace.traceId,
+      stage: "teardown",
+      ms: msSinceStart(session.trace),
+      streamSid,
+      callSid: session.callSid,
+      reason,
+      audioInChunks: session.audioInChunks,
+      audioOutChunks: session.audioOutChunks,
+    });
     this.sessions.delete(streamSid);
 
     try {
