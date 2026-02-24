@@ -62,7 +62,9 @@ export default function Home() {
       const connectUrl = `${connectUrlBase}?model=${encodeURIComponent(targetModel)}`;
 
       const pc = new RTCPeerConnection({
-        iceServers: [{ urls: 'stun:global.stun.twilio.com:3478?transport=udp' }],
+        iceServers: [
+          { urls: ['stun:stun.l.google.com:19302', 'stun:global.stun.twilio.com:3478'] },
+        ],
       });
       pcRef.current = pc;
 
