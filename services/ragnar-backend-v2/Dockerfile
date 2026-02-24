@@ -22,7 +22,7 @@ RUN git clone https://github.com/ggerganov/whisper.cpp.git /tmp/whisper.cpp \
 # Note: this fetches a pinned release asset. If it breaks, use your own piper build and set PIPER_BIN.
 ARG PIPER_VERSION=1.2.0
 RUN mkdir -p /opt/piper \
-  && curl -L -o /tmp/piper.tar.gz https://github.com/rhasspy/piper/releases/download/v${PIPER_VERSION}/piper_linux_x86_64.tar.gz \
+  && curl -fL -o /tmp/piper.tar.gz https://github.com/rhasspy/piper/releases/download/v${PIPER_VERSION}/piper_amd64.tar.gz \
   && tar -xzf /tmp/piper.tar.gz -C /opt/piper --strip-components=1 \
   && rm -f /tmp/piper.tar.gz
 
