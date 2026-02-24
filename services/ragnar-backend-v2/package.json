@@ -3,11 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "description": "Ragnar backend v2: whisper.cpp ASR + Piper TTS over the voice-relay-server websocket contract",
-  "main": "dist/server.js",
+  "main": "dist/src/server.js",
   "scripts": {
     "dev": "tsx src/server.ts",
     "build": "tsc",
-    "start": "node dist/server.js",
+    "start": "node dist/src/server.js",
     "lint": "tsc --noEmit",
     "simulate": "tsx scripts/simulate.ts"
   },
