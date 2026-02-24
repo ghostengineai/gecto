@@ -1,13 +1,17 @@
 import fs from "node:fs/promises";
 
 export const PCM16_SAMPLE_RATE = 16_000;
-export const PCM16_FRAME_SAMPLES_20MS = 320;
-export const PCM16_FRAME_BYTES_20MS = PCM16_FRAME_SAMPLES_20MS * 2;
 
-export const chunkPcm16 = (pcm: Buffer, frameBytes = PCM16_FRAME_BYTES_20MS): Buffer[] => {
+export const frameBytes = (sampleRate: number, frameMs = 20): number => {
+  const samples = Math.round(sampleRate * (frameMs / 1000));
+  return samples * 2; // PCM16
+};
+
+export const chunkPcm16 = (pcm: Buffer, sampleRate: number, frameMs = 20): Buffer[] => {
+  const bytesPerFrame = frameBytes(sampleRate, frameMs);
   const chunks: Buffer[] = [];
-  for (let i = 0; i < pcm.length; i += frameBytes) {
-    chunks.push(pcm.subarray(i, Math.min(i + frameBytes, pcm.length)));
+  for (let i = 0; i < pcm.length; i += bytesPerFrame) {
+    chunks.push(pcm.subarray(i, Math.min(i + bytesPerFrame, pcm.length)));
   }
   return chunks;
 };

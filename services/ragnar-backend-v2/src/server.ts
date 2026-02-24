@@ -8,6 +8,10 @@ import { PiperTts } from "./modules/tts/piper";
 import { ConversationCore } from "./core/conversation";
 import { appendAudioChunk, consumeBufferedAudio, createSession } from "./core/session";
 import { chunkPcm16 } from "./util/audio";
+
+const relayInputSampleRate = Number(process.env.RELAY_INPUT_SAMPLE_RATE ?? 16000);
+const relayOutputSampleRate = Number(process.env.RELAY_OUTPUT_SAMPLE_RATE ?? 24000);
+
 import { log } from "./util/log";
 
 dotenv.config();
@@ -41,6 +45,7 @@ const tts = new PiperTts({
   modelPath: PIPER_MODEL_PATH ?? "",
   configPath: PIPER_CONFIG_PATH ?? "",
   ffmpegPath: FFMPEG_BIN,
+  outputSampleRate: relayOutputSampleRate,
 });
 
 const app = express();
@@ -54,6 +59,10 @@ app.get("/healthz", async (_req, res) => {
     asr: asrReady,
     tts: ttsReady,
     port: PORT,
+    relay: {
+      inputSampleRate: relayInputSampleRate,
+      outputSampleRate: relayOutputSampleRate,
+    },
   });
 });
 
@@ -104,7 +113,7 @@ wss.on("connection", (socket: WebSocket) => {
     // synthesize after text is complete (keeps implementation simple)
     try {
       const ttsRes = await tts.synthesize(response.text);
-      for (const chunk of chunkPcm16(ttsRes.pcm16)) {
+      for (const chunk of chunkPcm16(ttsRes.pcm16, relayOutputSampleRate)) {
         sendEvent({ type: "audio_delta", audio: chunk.toString("base64") });
       }
     } catch (e) {
@@ -115,26 +124,40 @@ wss.on("connection", (socket: WebSocket) => {
     sendEvent({ type: "response_completed", responseId });
   };
 
+  let inFlight = false;
+
   const handleCommit = async (instructions?: string) => {
-    const audio = consumeBufferedAudio(session);
-    if (!audio.length) {
-      await handleTurnFromText("", instructions);
+    if (inFlight) {
+      // Avoid interleaving responses if multiple commits arrive quickly (VAD + DTMF).
+      log.warn("commit ignored: turn already in flight", { sessionId: session.id });
       return;
     }
 
+    inFlight = true;
     try {
-      const asrRes = await asr.transcribePcm16kMono(audio);
-      const text = asrRes.text || "";
-      await handleTurnFromText(text, instructions);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "ASR error";
-      log.warn("asr failed", { err: msg });
-      fail(msg);
+      const audio = consumeBufferedAudio(session);
+      if (!audio.length) {
+        await handleTurnFromText("", instructions);
+        return;
+      }
+
+      try {
+        const asrRes = await asr.transcribePcm16kMono(audio);
+        const text = asrRes.text || "";
+        await handleTurnFromText(text, instructions);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "ASR error";
+        log.warn("asr failed", { err: msg });
+        fail(msg);
+      }
+    } finally {
+      inFlight = false;
     }
   };
 
   log.info("ws connected", { sessionId: session.id });
-  sendEvent({ type: "ready" });
+  // Backwards-compatible: clients ignoring extra fields are fine.
+  sendEvent({ type: "ready", inputSampleRate: relayInputSampleRate, outputSampleRate: relayOutputSampleRate } as any);
 
   socket.on("message", (raw: RawData) => {
     try {

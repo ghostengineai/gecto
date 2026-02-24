@@ -11,6 +11,7 @@ interface PiperOptions {
   modelPath: string;
   configPath: string;
   ffmpegPath: string;
+  outputSampleRate: number;
 }
 
 export class PiperTts implements TtsModule {
@@ -28,6 +29,7 @@ export class PiperTts implements TtsModule {
           modelPath: this.opts.modelPath,
           configPath: this.opts.configPath,
           ffmpegPath: this.opts.ffmpegPath,
+          outputSampleRate: this.opts.outputSampleRate,
         },
       };
     } catch (e) {
@@ -81,7 +83,7 @@ export class PiperTts implements TtsModule {
           "-ac",
           "1",
           "-ar",
-          "16000",
+          String(this.opts.outputSampleRate),
           "-f",
           "s16le",
           pcmPath,

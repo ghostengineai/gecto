@@ -3,7 +3,7 @@
 Self-hosted Ragnar backend that terminates the `voice-relay-server` WebSocket contract and runs:
 
 - **ASR:** `whisper.cpp` (PCM16@16kHz → transcript)
-- **TTS:** `piper` (text → WAV) + `ffmpeg` resample to PCM16@16kHz
+- **TTS:** `piper` (text → WAV) + `ffmpeg` resample to PCM16@RELAY_OUTPUT_SAMPLE_RATE (default 24k)
 
 This is an intentionally simple *chunked* pipeline:
 
@@ -26,6 +26,8 @@ This is an intentionally simple *chunked* pipeline:
 | `PIPER_BIN` | ❌ | `/opt/piper/piper` | piper binary path |
 | `PIPER_MODEL_PATH` | ✅ | - | `.onnx` model path |
 | `PIPER_CONFIG_PATH` | ❌ | `${PIPER_MODEL_PATH}.json` | model config json |
+| `RELAY_INPUT_SAMPLE_RATE` | ❌ | `16000` | expected sample rate for inbound `audio_chunk` frames |
+| `RELAY_OUTPUT_SAMPLE_RATE` | ❌ | `24000` | sample rate produced for outbound `audio_delta` frames |
 | `FFMPEG_BIN` | ❌ | `ffmpeg` | used for resampling |
 | `LOG_LEVEL` | ❌ | `info` | `debug|info|warn|error` |
 

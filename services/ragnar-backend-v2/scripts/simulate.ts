@@ -13,7 +13,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { execFile } from "../src/util/exec";
-import { PCM16_FRAME_BYTES_20MS, chunkPcm16 } from "../src/util/audio";
+import { chunkPcm16 } from "../src/util/audio";
 
 const arg = (name: string): string | undefined => {
   const idx = process.argv.indexOf(name);
@@ -67,7 +67,7 @@ const main = async () => {
     ws.send(JSON.stringify({ type: "commit" }));
   } else if (wav) {
     const pcm = await wavToPcm16k(wav);
-    const chunks = chunkPcm16(pcm, PCM16_FRAME_BYTES_20MS);
+    const chunks = chunkPcm16(pcm, 16000);
     for (const chunk of chunks) {
       ws.send(JSON.stringify({ type: "audio_chunk", audio: chunk.toString("base64") }));
       // avoid flooding
