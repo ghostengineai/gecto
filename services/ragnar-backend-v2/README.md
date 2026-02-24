@@ -39,6 +39,9 @@ See `docs/phone/observability.md`.
 | `RELAY_OUTPUT_SAMPLE_RATE` | ❌ | `24000` | sample rate produced for outbound `audio_delta` frames |
 | `FFMPEG_BIN` | ❌ | `ffmpeg` | used for resampling |
 | `LOG_LEVEL` | ❌ | `info` | `debug|info|warn|error` |
+| `SUPABASE_LOG_CALLS` | ❌ | - | set to `1` to enable call transcript logging (text only) |
+| `SUPABASE_URL` | ❌ | - | Supabase project URL (required if `SUPABASE_LOG_CALLS=1`) |
+| `SUPABASE_SERVICE_ROLE_KEY` | ❌ | - | service role key (required if `SUPABASE_LOG_CALLS=1`) |
 
 Create a `.env`:
 

@@ -8,6 +8,12 @@ import { PiperTts } from "./modules/tts/piper";
 import { ConversationCore } from "./core/conversation";
 import { appendAudioChunk, consumeBufferedAudio, createSession } from "./core/session";
 import { chunkPcm16 } from "./util/audio";
+import {
+  supabaseInsertTurn,
+  supabaseMarkCallEnded,
+  supabaseUpsertCall,
+  supabaseLoggingEnabled,
+} from "./services/supabaseLog";
 
 const relayInputSampleRate = Number(process.env.RELAY_INPUT_SAMPLE_RATE ?? 16000);
 const relayOutputSampleRate = Number(process.env.RELAY_OUTPUT_SAMPLE_RATE ?? 24000);
@@ -94,6 +100,16 @@ wss.on("connection", (socket: WebSocket) => {
   let callSid: string | undefined;
   let streamSid: string | undefined;
   let audioChunksIn = 0;
+  let turnIndex = 0;
+
+  if (supabaseLoggingEnabled()) {
+    log.info("supabase call logging enabled", {
+      traceId: trace.traceId,
+      stage: "supabase_enabled",
+      ms: msSinceStart(trace),
+      sessionId: session.id,
+    });
+  }
 
   mark(trace, "ws_connected");
 
@@ -116,6 +132,29 @@ wss.on("connection", (socket: WebSocket) => {
     mark(trace, "llm_done");
 
     const responseId = `resp_${randomUUID().slice(0, 10)}`;
+
+    // Persist transcript + response (text only) for "listen-in" UI.
+    // Never store audio.
+    turnIndex += 1;
+    void supabaseUpsertCall({
+      callSid,
+      streamSid,
+      traceId: trace.traceId,
+      sessionId: session.id,
+      relayInputSampleRate: relayInputSampleRate,
+      relayOutputSampleRate: relayOutputSampleRate,
+    });
+    void supabaseInsertTurn({
+      callSid,
+      traceId: trace.traceId,
+      streamSid,
+      sessionId: session.id,
+      turnIndex,
+      userText: transcript,
+      assistantText: response.text,
+      instructions,
+      responseId,
+    });
 
     log.info("response text ready", {
       traceId: trace.traceId,
@@ -274,6 +313,16 @@ wss.on("connection", (socket: WebSocket) => {
             callSid,
             streamSid,
           });
+
+          void supabaseUpsertCall({
+            callSid,
+            streamSid,
+            traceId: trace.traceId,
+            sessionId: session.id,
+            relayInputSampleRate: relayInputSampleRate,
+            relayOutputSampleRate: relayOutputSampleRate,
+            startedAtMs: payload.startedAt,
+          });
           break;
         }
         case "audio_chunk": {
@@ -337,6 +386,7 @@ wss.on("connection", (socket: WebSocket) => {
   });
 
   socket.on("close", () => {
+    void supabaseMarkCallEnded(callSid);
     log.info("ws closed", {
       traceId: trace.traceId,
       stage: "ws_closed",
