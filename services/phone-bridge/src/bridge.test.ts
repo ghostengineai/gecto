@@ -169,7 +169,8 @@ describe("PhoneBridgeManager", () => {
 
     await waitFor(() => relayMessages.some((msg) => msg.type === "commit"));
     const commitEvent = relayMessages.find((msg) => msg.type === "commit");
-    expect(commitEvent).toEqual({ type: "commit" });
+    expect(commitEvent).toBeDefined();
+    expect(commitEvent.type).toBe("commit");
   });
 
   it("pipes relay audio deltas back to Twilio as outbound frames", async () => {

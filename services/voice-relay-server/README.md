@@ -44,6 +44,15 @@ npm run build && npm start
 
 `GET http://localhost:5050/healthz` → `{ "ok": true, "backend": "ws://localhost:5051/relay" }`
 
+## Observability
+
+`voice-relay-server` emits structured JSON logs and attempts to preserve a `traceId` across the proxy boundary.
+
+- If the client sends `{type:"start", traceId}` or includes `traceId` on other messages, the relay will adopt it.
+- Otherwise, it generates a random `traceId`.
+
+See `docs/phone/observability.md`.
+
 ## WebSocket Contract
 
 Clients still connect to `ws://localhost:5050/relay` and exchange JSON payloads.
