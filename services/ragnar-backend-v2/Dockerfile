@@ -19,8 +19,9 @@ RUN git clone https://github.com/ggerganov/whisper.cpp.git /tmp/whisper.cpp \
   && mkdir -p /opt/whispercpp/lib \
   && (cp build/bin/whisper-cli /opt/whispercpp/whisper-cli || true) \
   && (cp build/bin/main /opt/whispercpp/main || true) \
-  && (find build -maxdepth 4 -type f -name 'libwhisper.so*' -exec cp -v {} /opt/whispercpp/lib/ \; || true) \
-  && (find build -maxdepth 6 -type f -name 'libggml*.so*' -exec cp -v {} /opt/whispercpp/lib/ \; || true)
+  && (find /tmp/whisper.cpp -type f -name 'libwhisper.so*' -exec cp -v {} /opt/whispercpp/lib/ \; || true) \
+  && (find /tmp/whisper.cpp -type f -name 'libggml*.so*' -exec cp -v {} /opt/whispercpp/lib/ \; || true) \
+  && (cd /opt/whispercpp/lib && (ls -la || true) && (ln -sf libwhisper.so.* libwhisper.so.1 || true))
 
 # Install piper binary (release build)
 # Note: this fetches a pinned release asset. If it breaks, use your own piper build and set PIPER_BIN.
