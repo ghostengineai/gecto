@@ -143,14 +143,34 @@ export class PhoneBridgeManager {
 
     relay.on("message", (data: RawData) => {
       try {
-        const payload = JSON.parse(data.toString());
+        const dataStr = typeof data === "string" ? data : data.toString("utf8");
+        const payload = JSON.parse(dataStr);
+        // Critical debug: confirm we are actually receiving relay protocol events.
+        if (payload?.type) {
+          console.log(`[phone-bridge] relay event ${payload.type} for stream ${session.streamSid}`);
+        } else {
+          console.log(`[phone-bridge] relay event (no type) for stream ${session.streamSid}`);
+        }
         this.handleRelayEvent(session, payload);
       } catch (error) {
-        console.error("[phone-bridge] failed to parse relay payload", error);
+        // Surface a safe preview of the raw payload; this is usually enough to spot a protocol mismatch.
+        const preview = (() => {
+          try {
+            const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as any);
+            return buf.toString("utf8", 0, Math.min(buf.length, 300));
+          } catch {
+            return "(unprintable)";
+          }
+        })();
+        console.error("[phone-bridge] failed to parse relay payload", { err: error, preview });
       }
     });
 
-    relay.on("close", () => {
+    relay.on("close", (code: number, reason: Buffer) => {
+      console.warn(`[phone-bridge] relay closed for stream ${session.streamSid}`, {
+        code,
+        reason: reason?.toString?.("utf8") || "",
+      });
       if (this.sessions.has(session.streamSid)) {
         this.teardown(session.streamSid, "relay_close");
       }
