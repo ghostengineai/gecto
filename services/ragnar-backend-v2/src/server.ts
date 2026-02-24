@@ -71,7 +71,11 @@ app.get("/selftest/asr", async (_req, res) => {
   try {
     const pcm16Silence = Buffer.alloc(16000 * 2); // 1s @ 16kHz, mono, s16le
     const r = await asr.transcribePcm16kMono(pcm16Silence);
-    res.json({ ok: true, text: r.text });
+
+    // Defensive: if a deploy somehow returns a non-string (older module/shape), surface it clearly.
+    const text = typeof (r as any)?.text === "string" ? (r as any).text : JSON.stringify((r as any)?.text ?? r);
+
+    res.json({ ok: true, text, rawType: typeof (r as any)?.text });
   } catch (e) {
     res.status(500).json({
       ok: false,
