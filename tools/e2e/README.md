@@ -42,3 +42,21 @@ node tools/e2e/ws-relay-smoke.mjs \
 Notes:
 - `--out` is optional; it will only write a WAV if `audio_delta` is observed.
 - Requires Node.js 20+ (for global `WebSocket`).
+
+## ws-relay-replay-wav.mjs
+
+Replays a WAV (mono, PCM16) into `/relay` as a stream of `{type:"audio_chunk"}` frames.
+
+This is the foundation for "golden call" regression checks: keep a stable input WAV and inspect the resulting transcript / response.
+
+```bash
+node tools/e2e/ws-relay-replay-wav.mjs \
+  --relay ws://localhost:5050/relay \
+  --wav ./path/to/input-16k-mono.wav \
+  --commit \
+  --out /tmp/golden-run.json
+```
+
+Notes:
+- The script expects 16kHz mono PCM16 by default. Override with `--rate` if needed.
+- The run report includes `traceId` which can be correlated across phone-bridge → voice-relay-server → ragnar-backend-v2 logs.

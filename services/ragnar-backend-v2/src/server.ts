@@ -13,6 +13,7 @@ const relayInputSampleRate = Number(process.env.RELAY_INPUT_SAMPLE_RATE ?? 16000
 const relayOutputSampleRate = Number(process.env.RELAY_OUTPUT_SAMPLE_RATE ?? 24000);
 
 import { log } from "./util/log";
+import { createTrace, mark, msSinceStart } from "./util/trace";
 
 dotenv.config();
 
@@ -70,10 +71,11 @@ const server = createServer(app);
 const wss = new WebSocketServer({ server, path: "/relay" });
 
 type ClientMessage =
-  | { type: "audio_chunk"; audio: string }
-  | { type: "commit"; instructions?: string }
-  | { type: "text"; text: string }
-  | { type: "end" };
+  | { type: "start"; traceId?: string; callSid?: string; streamSid?: string; startedAt?: number }
+  | { type: "audio_chunk"; audio: string; traceId?: string }
+  | { type: "commit"; instructions?: string; traceId?: string; reason?: string }
+  | { type: "text"; text: string; traceId?: string }
+  | { type: "end"; traceId?: string };
 
 type RelayEvent =
   | { type: "ready" }
@@ -87,6 +89,13 @@ type RelayEvent =
 wss.on("connection", (socket: WebSocket) => {
   const session = createSession();
   const convo = new ConversationCore();
+
+  const trace = createTrace();
+  let callSid: string | undefined;
+  let streamSid: string | undefined;
+  let audioChunksIn = 0;
+
+  mark(trace, "ws_connected");
 
   const sendEvent = (event: RelayEvent) => {
     if (socket.readyState === WebSocket.OPEN) {
@@ -102,8 +111,20 @@ wss.on("connection", (socket: WebSocket) => {
     const transcript = userText.trim();
     sendEvent({ type: "transcript", text: transcript });
 
+    mark(trace, "llm_start");
     const response = convo.respond({ userText: transcript, instructions });
+    mark(trace, "llm_done");
+
     const responseId = `resp_${randomUUID().slice(0, 10)}`;
+
+    log.info("response text ready", {
+      traceId: trace.traceId,
+      stage: "llm_done",
+      ms: msSinceStart(trace),
+      sessionId: session.id,
+      responseId,
+      textLen: response.text.length,
+    });
 
     for (const d of convo.chunkText(response.text)) {
       sendEvent({ type: "text_delta", text: d });
@@ -112,16 +133,45 @@ wss.on("connection", (socket: WebSocket) => {
 
     // synthesize after text is complete (keeps implementation simple)
     try {
+      mark(trace, "tts_start");
       const ttsRes = await tts.synthesize(response.text);
+      mark(trace, "tts_done");
+
+      let audioChunksOut = 0;
       for (const chunk of chunkPcm16(ttsRes.pcm16, relayOutputSampleRate)) {
+        audioChunksOut += 1;
         sendEvent({ type: "audio_delta", audio: chunk.toString("base64") });
       }
+
+      log.info("tts complete", {
+        traceId: trace.traceId,
+        stage: "tts_done",
+        ms: msSinceStart(trace),
+        sessionId: session.id,
+        responseId,
+        audioChunksOut,
+        pcmBytes: ttsRes.pcm16.length,
+      });
     } catch (e) {
-      log.warn("tts failed", { err: e instanceof Error ? e.message : String(e) });
+      log.warn("tts failed", {
+        traceId: trace.traceId,
+        stage: "tts_error",
+        ms: msSinceStart(trace),
+        sessionId: session.id,
+        err: e instanceof Error ? e.message : String(e),
+      });
       // allow session to continue even if TTS fails
     }
 
+    mark(trace, "response_completed");
     sendEvent({ type: "response_completed", responseId });
+    log.info("response completed", {
+      traceId: trace.traceId,
+      stage: "response_completed",
+      ms: msSinceStart(trace),
+      sessionId: session.id,
+      responseId,
+    });
   };
 
   let inFlight = false;
@@ -129,7 +179,12 @@ wss.on("connection", (socket: WebSocket) => {
   const handleCommit = async (instructions?: string) => {
     if (inFlight) {
       // Avoid interleaving responses if multiple commits arrive quickly (VAD + DTMF).
-      log.warn("commit ignored: turn already in flight", { sessionId: session.id });
+      log.warn("commit ignored: turn already in flight", {
+        traceId: trace.traceId,
+        stage: "commit_ignored",
+        ms: msSinceStart(trace),
+        sessionId: session.id,
+      });
       return;
     }
 
@@ -142,12 +197,37 @@ wss.on("connection", (socket: WebSocket) => {
       }
 
       try {
+        mark(trace, "asr_start");
+        log.info("asr start", {
+          traceId: trace.traceId,
+          stage: "asr_start",
+          ms: msSinceStart(trace),
+          sessionId: session.id,
+          bytes: audio.length,
+        });
+
         const asrRes = await asr.transcribePcm16kMono(audio);
+        mark(trace, "asr_done");
+
         const text = asrRes.text || "";
+        log.info("asr done", {
+          traceId: trace.traceId,
+          stage: "asr_done",
+          ms: msSinceStart(trace),
+          sessionId: session.id,
+          textLen: text.length,
+        });
+
         await handleTurnFromText(text, instructions);
       } catch (e) {
         const msg = e instanceof Error ? e.message : "ASR error";
-        log.warn("asr failed", { err: msg });
+        log.warn("asr failed", {
+          traceId: trace.traceId,
+          stage: "asr_error",
+          ms: msSinceStart(trace),
+          sessionId: session.id,
+          err: msg,
+        });
         fail(msg);
       }
     } finally {
@@ -155,30 +235,84 @@ wss.on("connection", (socket: WebSocket) => {
     }
   };
 
-  log.info("ws connected", { sessionId: session.id });
+  log.info("ws connected", {
+    traceId: trace.traceId,
+    stage: "ws_connected",
+    ms: msSinceStart(trace),
+    sessionId: session.id,
+  });
   // Backwards-compatible: clients ignoring extra fields are fine.
+  mark(trace, "ready_sent");
   sendEvent({ type: "ready", inputSampleRate: relayInputSampleRate, outputSampleRate: relayOutputSampleRate } as any);
+  log.debug("ready sent", {
+    traceId: trace.traceId,
+    stage: "ready_sent",
+    ms: msSinceStart(trace),
+    sessionId: session.id,
+  });
 
   socket.on("message", (raw: RawData) => {
     try {
       const payload = JSON.parse(raw.toString()) as ClientMessage;
 
+      const incomingTraceId = (payload as any)?.traceId;
+      if (typeof incomingTraceId === "string" && incomingTraceId.trim()) {
+        trace.traceId = incomingTraceId.trim();
+      }
+
       switch (payload.type) {
+        case "start": {
+          if (payload.traceId && payload.traceId.trim()) trace.traceId = payload.traceId.trim();
+          callSid = payload.callSid ?? callSid;
+          streamSid = payload.streamSid ?? streamSid;
+          mark(trace, "start_received");
+          log.info("start received", {
+            traceId: trace.traceId,
+            stage: "start_received",
+            ms: msSinceStart(trace),
+            sessionId: session.id,
+            callSid,
+            streamSid,
+          });
+          break;
+        }
         case "audio_chunk": {
           if (typeof payload.audio !== "string" || !payload.audio) {
             throw new Error("audio_chunk payload missing base64 audio field");
           }
           const chunk = Buffer.from(payload.audio, "base64");
           appendAudioChunk(session, chunk);
+          audioChunksIn += 1;
           break;
         }
         case "commit": {
+          mark(trace, "commit_received");
+          log.info("commit received", {
+            traceId: trace.traceId,
+            stage: "commit_received",
+            ms: msSinceStart(trace),
+            sessionId: session.id,
+            callSid,
+            streamSid,
+            audioChunksIn,
+            reason: payload.reason,
+          });
           void handleCommit(payload.instructions);
           break;
         }
         case "text": {
           const text = payload.text?.trim();
           if (!text) throw new Error("text payload must include non-empty text field");
+          mark(trace, "text_received");
+          log.info("text received", {
+            traceId: trace.traceId,
+            stage: "text_received",
+            ms: msSinceStart(trace),
+            sessionId: session.id,
+            callSid,
+            streamSid,
+            textLen: text.length,
+          });
           void handleTurnFromText(text);
           break;
         }
@@ -191,16 +325,37 @@ wss.on("connection", (socket: WebSocket) => {
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Unknown error";
+      log.warn("ws message handling failed", {
+        traceId: trace.traceId,
+        stage: "ws_message_error",
+        ms: msSinceStart(trace),
+        sessionId: session.id,
+        err: msg,
+      });
       fail(msg);
     }
   });
 
   socket.on("close", () => {
-    log.info("ws closed", { sessionId: session.id });
+    log.info("ws closed", {
+      traceId: trace.traceId,
+      stage: "ws_closed",
+      ms: msSinceStart(trace),
+      sessionId: session.id,
+      callSid,
+      streamSid,
+      audioChunksIn,
+    });
   });
 
   socket.on("error", (error: Error) => {
-    log.warn("ws error", { sessionId: session.id, err: error.message });
+    log.warn("ws error", {
+      traceId: trace.traceId,
+      stage: "ws_error",
+      ms: msSinceStart(trace),
+      sessionId: session.id,
+      err: error.message,
+    });
     socket.close();
   });
 });

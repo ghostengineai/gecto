@@ -16,6 +16,15 @@ This is an intentionally simple *chunked* pipeline:
 - `GET /healthz` → readiness & config
 - `WS /relay` → same JSON contract as `services/voice-relay-server`
 
+## Observability
+
+`ragnar-backend-v2` emits structured JSON logs and will adopt a client-provided `traceId` when present.
+
+- If upstream sends `{type:"start", traceId}` it is logged as `stage=start_received`.
+- `stage` + `ms` fields help break down where time is spent (ASR vs response vs TTS).
+
+See `docs/phone/observability.md`.
+
 ## Environment
 
 | Name | Required | Default | Notes |

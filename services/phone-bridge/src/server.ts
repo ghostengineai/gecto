@@ -7,6 +7,7 @@ import twilio, { twiml } from "twilio";
 import bodyParser from "body-parser";
 import { PhoneBridgeManager } from "./bridge";
 import type { BridgeConfig } from "./types";
+import { log } from "./util/log";
 
 const PORT = Number(process.env.PORT ?? 5060);
 const RELAY_URL = process.env.VOICE_RELAY_URL ?? "ws://localhost:5050/relay";
@@ -54,7 +55,7 @@ const config: BridgeConfig = {
 };
 
 if (!PUBLIC_WS_URL) {
-  console.warn("[phone-bridge] PUBLIC_WS_URL or PUBLIC_BASE_URL is required so Twilio can reach the media stream");
+  log.warn("PUBLIC_WS_URL or PUBLIC_BASE_URL is required so Twilio can reach the media stream", { component: "phone-bridge" });
 }
 
 const bridgeManager = new PhoneBridgeManager(config);
@@ -141,7 +142,10 @@ app.post("/api/call", requireApiToken, async (req, res) => {
 
     res.json({ ok: true, callSid: call.sid });
   } catch (error) {
-    console.error("[phone-bridge] failed to initiate call", error);
+    log.error("failed to initiate call", {
+      component: "phone-bridge",
+      err: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: "Failed to initiate call" });
   }
 });
@@ -150,12 +154,12 @@ const server = createServer(app);
 const wss = new WebSocketServer({ server, path: TWILIO_STREAM_PATH });
 
 wss.on("connection", (socket) => {
-  console.log("[phone-bridge] Twilio media stream connected");
+  log.info("twilio media stream connected", { component: "phone-bridge" });
   bridgeManager.handleTwilioSocket(socket);
 });
 
 server.listen(PORT, () => {
-  console.log(`[phone-bridge] listening on http://localhost:${PORT}`);
+  log.info("listening", { component: "phone-bridge", url: `http://localhost:${PORT}` });
 });
 
 function maybeValidateTwilio(req: Request, res: Response, next: NextFunction) {

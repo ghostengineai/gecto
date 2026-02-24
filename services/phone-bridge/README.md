@@ -109,6 +109,13 @@ Telnyx Call Control WebRTC streams expose the same μ-law audio payloads. To sup
 - Mirror the Twilio webhook with Call Control instructions to start streaming audio to the bridge.
 - Re-use `PhoneBridgeManager` by abstracting the media adapter (Twilio vs Telnyx) so both produce/consume the same internal events.
 
+## Observability
+
+`phone-bridge` emits structured JSON logs with a per-call `traceId` (seeded from Twilio `callSid`).
+
+- See `docs/phone/observability.md` for the common schema and stage names.
+- Audio/base64 payloads are redacted from logs.
+
 ## Troubleshooting
 
 | Symptom | Possible Cause |

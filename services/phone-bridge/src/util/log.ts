@@ -15,6 +15,7 @@ const nowIso = () => new Date().toISOString();
 const shouldLog = (level: Level) => levelOrder[level] >= minLevel;
 
 const looksLikeBase64Audio = (s: string) => {
+  // Very heuristic: long-ish, base64 charset, no whitespace.
   if (s.length < 256) return false;
   if (/\s/.test(s)) return false;
   if (!/^[A-Za-z0-9+/=]+$/.test(s)) return false;
@@ -32,34 +33,35 @@ const redactString = (value: string): string => {
 
 const redact = (key: string, value: unknown): unknown => {
   if (typeof value !== "string") return value;
-  if (["audio", "payload", "pcm", "pcm16", "mulaw"].includes(key)) return "[REDACTED_AUDIO]";
+  if (["audio", "payload", "pcm", "pcm16", "mulaw"].includes(key)) {
+    return "[REDACTED_AUDIO]";
+  }
   return redactString(value);
 };
 
-const baseLog = (level: Level, msg: string, meta?: Record<string, unknown>) => {
+const safeJson = (meta: Record<string, unknown>) =>
+  JSON.parse(
+    JSON.stringify(meta, (k, v) => {
+      if (!k) return v;
+      return redact(k, v);
+    }),
+  );
+
+const baseLog = (level: Level, msg: string, fields?: Record<string, unknown>) => {
   if (!shouldLog(level)) return;
   const payload = {
     t: nowIso(),
     level,
     msg,
-    ...(meta
-      ? {
-          meta: JSON.parse(
-            JSON.stringify(meta, (k, v) => {
-              if (!k) return v;
-              return redact(k, v);
-            }),
-          ),
-        }
-      : {}),
+    ...(fields ? safeJson(fields) : {}),
   };
   // eslint-disable-next-line no-console
   console.log(JSON.stringify(payload));
 };
 
 export const log = {
-  debug: (msg: string, meta?: Record<string, unknown>) => baseLog("debug", msg, meta),
-  info: (msg: string, meta?: Record<string, unknown>) => baseLog("info", msg, meta),
-  warn: (msg: string, meta?: Record<string, unknown>) => baseLog("warn", msg, meta),
-  error: (msg: string, meta?: Record<string, unknown>) => baseLog("error", msg, meta),
+  debug: (msg: string, fields?: Record<string, unknown>) => baseLog("debug", msg, fields),
+  info: (msg: string, fields?: Record<string, unknown>) => baseLog("info", msg, fields),
+  warn: (msg: string, fields?: Record<string, unknown>) => baseLog("warn", msg, fields),
+  error: (msg: string, fields?: Record<string, unknown>) => baseLog("error", msg, fields),
 };
