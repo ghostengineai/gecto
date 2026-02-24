@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   base64ToFloat32,
+  cloneFloat32,
   computeRms,
   concatInt16,
   floatToInt16,
@@ -119,7 +120,8 @@ export default function Home() {
     if (!floats.length) return;
 
     const buffer = ctx.createBuffer(1, floats.length, RELAY_OUTPUT_SAMPLE_RATE);
-    buffer.copyToChannel(floats as Float32Array, 0, 0);
+    const normalized = cloneFloat32(floats);
+    buffer.copyToChannel(normalized, 0, 0);
     const source = ctx.createBufferSource();
     source.buffer = buffer;
     source.connect(ctx.destination);
