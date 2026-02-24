@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [ master ]
+
+jobs:
+  backend_v2_typescript:
+    name: ragnar-backend-v2 (tsc)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/ragnar-backend-v2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: services/ragnar-backend-v2/package-lock.json
+      - run: npm ci
+      - run: npm run build
+
+  backend_v2_docker_build:
+    name: ragnar-backend-v2 (docker build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build Docker image
+        run: |
+          docker build \
+            -f services/ragnar-backend-v2/Dockerfile \
+            -t gecto/ragnar-backend-v2:ci \
+            .
