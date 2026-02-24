@@ -18,7 +18,7 @@ dotenv.config();
 
 const PORT = Number(process.env.RAGNAR_BACKEND_V2_PORT ?? process.env.PORT ?? 5052);
 
-const WHISPER_CPP_BIN = process.env.WHISPER_CPP_BIN ?? "/opt/whispercpp/main";
+const WHISPER_CPP_BIN = process.env.WHISPER_CPP_BIN ?? "/opt/whispercpp/whisper-cli";
 const WHISPER_MODEL_PATH = process.env.WHISPER_MODEL_PATH;
 
 const PIPER_BIN = process.env.PIPER_BIN ?? "/opt/piper/piper";
