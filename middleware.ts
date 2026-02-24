@@ -4,6 +4,14 @@ import type { NextRequest } from 'next/server';
 const USER = process.env.BASIC_AUTH_USERNAME;
 const PASS = process.env.BASIC_AUTH_PASSWORD;
 
+const decodeBase64 = (value: string) => {
+  if (typeof atob === 'function') {
+    return atob(value);
+  }
+  // Fallback for local dev environments where atob might not exist
+  return Buffer.from(value, 'base64').toString();
+};
+
 export function middleware(request: NextRequest) {
   if (!USER || !PASS) {
     return NextResponse.next();
@@ -19,7 +27,7 @@ export function middleware(request: NextRequest) {
   }
 
   const base64Credentials = authHeader.split(' ')[1];
-  const decoded = Buffer.from(base64Credentials, 'base64').toString();
+  const decoded = decodeBase64(base64Credentials);
   const [username, password] = decoded.split(':');
 
   if (username === USER && password === PASS) {
