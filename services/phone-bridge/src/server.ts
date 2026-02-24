@@ -91,9 +91,11 @@ twilioRouter.post(
 
     const response = new twiml.VoiceResponse();
     const connect = response.connect();
+    // Twilio <Connect><Stream> supports track="inbound_track". (both_tracks is for <Start><Stream>)
+    // Outbound audio is still delivered by sending media frames back over the same WS.
     connect.stream({
       url: streamUrl.toString(),
-      track: "both_tracks",
+      track: "inbound_track",
     });
 
     res.type("text/xml").send(response.toString());
