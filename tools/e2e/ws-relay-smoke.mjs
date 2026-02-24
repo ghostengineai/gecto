@@ -6,7 +6,6 @@
  *   node tools/e2e/ws-relay-smoke.mjs --relay ws://localhost:5050/relay --text "hello" --out /tmp/out.wav
  */
 import fs from "node:fs";
-import { WebSocket } from "ws";
 
 function arg(name, def) {
   const idx = process.argv.indexOf(`--${name}`);
@@ -57,7 +56,14 @@ function writeWav16kMono(path, pcm) {
   fs.writeFileSync(path, Buffer.concat([header, pcm]));
 }
 
-const ws = new WebSocket(relayUrl);
+// Prefer Node 22+ built-in WebSocket.
+const WebSocketCtor = globalThis.WebSocket;
+if (!WebSocketCtor) {
+  console.error("No global WebSocket found. Use Node 22+ or install ws and adapt this script.");
+  process.exit(2);
+}
+
+const ws = new WebSocketCtor(relayUrl);
 
 const kill = (code, msg) => {
   try {
@@ -71,15 +77,28 @@ const timer = setTimeout(() => {
   kill(1, `Timeout after ${timeoutMs}ms waiting for response_completed`);
 }, timeoutMs);
 
-ws.on("open", () => {
+ws.addEventListener("open", () => {
   ws.send(JSON.stringify({ type: "text", text }));
   ws.send(JSON.stringify({ type: "commit" }));
 });
 
-ws.on("message", (data) => {
+ws.addEventListener("message", async (ev) => {
   let evt;
   try {
-    evt = JSON.parse(data.toString());
+    let dataStr;
+    if (typeof ev.data === "string") {
+      dataStr = ev.data;
+    } else if (ev.data instanceof ArrayBuffer) {
+      dataStr = Buffer.from(ev.data).toString("utf8");
+    } else if (ArrayBuffer.isView(ev.data)) {
+      dataStr = Buffer.from(ev.data.buffer, ev.data.byteOffset, ev.data.byteLength).toString("utf8");
+    } else if (typeof ev.data?.text === "function") {
+      // Blob in Node's WebSocket implementation
+      dataStr = await ev.data.text();
+    } else {
+      dataStr = Buffer.from(ev.data).toString("utf8");
+    }
+    evt = JSON.parse(dataStr);
   } catch {
     return;
   }
@@ -119,12 +138,12 @@ ws.on("message", (data) => {
   }
 });
 
-ws.on("error", (err) => {
+ws.addEventListener("error", (err) => {
   clearTimeout(timer);
   kill(1, `WS error: ${err?.message ?? String(err)}`);
 });
 
-ws.on("close", () => {
+ws.addEventListener("close", () => {
   if (!sawCompleted) {
     clearTimeout(timer);
     kill(1, "WebSocket closed before response_completed");
