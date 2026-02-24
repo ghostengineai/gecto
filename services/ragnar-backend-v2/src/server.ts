@@ -114,6 +114,25 @@ wss.on("connection", (socket: WebSocket) => {
   const session = createSession();
   const convo = new ConversationCore();
 
+  // Keepalive: reduces chance of intermediaries killing an otherwise healthy WS.
+  let lastPong = Date.now();
+  socket.on("pong", () => {
+    lastPong = Date.now();
+  });
+  const pingInterval = setInterval(() => {
+    if (socket.readyState !== WebSocket.OPEN) return;
+    // If we haven't received a pong in a while, let the close handler clean up.
+    if (Date.now() - lastPong > 90_000) {
+      try {
+        socket.terminate();
+      } catch {}
+      return;
+    }
+    try {
+      socket.ping();
+    } catch {}
+  }, 30_000);
+
   const trace = createTrace();
   let callSid: string | undefined;
   let streamSid: string | undefined;
@@ -143,6 +162,21 @@ wss.on("connection", (socket: WebSocket) => {
 
   const handleTurnFromText = async (userText: string, instructions?: string) => {
     const transcript = userText.trim();
+
+    // Biggest win: do not generate a turn for pure silence/no-speech commits.
+    if (!transcript) {
+      const responseId = `resp_${randomUUID().slice(0, 10)}`;
+      log.info("empty transcript: skipping response", {
+        traceId: trace.traceId,
+        stage: "empty_transcript",
+        ms: msSinceStart(trace),
+        sessionId: session.id,
+        responseId,
+      });
+      sendEvent({ type: "response_completed", responseId });
+      return;
+    }
+
     sendEvent({ type: "transcript", text: transcript });
 
     mark(trace, "llm_start");
@@ -188,18 +222,60 @@ wss.on("connection", (socket: WebSocket) => {
     }
     sendEvent({ type: "text_completed", text: response.text });
 
-    // synthesize after text is complete (keeps implementation simple)
+    // Big win: reduce time-to-first-audio by synthesizing in chunks.
+    // Piper isn't truly streaming, but smaller synth calls return audio sooner.
+    const splitForTts = (text: string): string[] => {
+      const t = text.trim();
+      if (!t) return [];
+      // Split into sentence-ish chunks, then cap each chunk length.
+      const sentences = t.split(/(?<=[.!?])\s+/g);
+      const chunks: string[] = [];
+      let cur = "";
+      const maxLen = 180;
+      for (const s of sentences) {
+        const next = cur ? `${cur} ${s}` : s;
+        if (next.length > maxLen && cur) {
+          chunks.push(cur);
+          cur = s;
+        } else {
+          cur = next;
+        }
+      }
+      if (cur) chunks.push(cur);
+      return chunks;
+    };
+
     try {
       mark(trace, "tts_start");
-      const ttsRes = await tts.synthesize(response.text);
-      mark(trace, "tts_done");
-
       let audioChunksOut = 0;
-      for (const chunk of chunkPcm16(ttsRes.pcm16, relayOutputSampleRate)) {
-        audioChunksOut += 1;
-        sendEvent({ type: "audio_delta", audio: chunk.toString("base64") });
+      let totalPcmBytes = 0;
+      let partIndex = 0;
+
+      for (const part of splitForTts(response.text)) {
+        partIndex += 1;
+        const ttsRes = await tts.synthesize(part);
+        totalPcmBytes += ttsRes.pcm16.length;
+
+        // Mark first audio as soon as we have it.
+        if (partIndex === 1) {
+          mark(trace, "tts_first_audio");
+          log.info("tts first audio", {
+            traceId: trace.traceId,
+            stage: "tts_first_audio",
+            ms: msSinceStart(trace),
+            sessionId: session.id,
+            responseId,
+            partLen: part.length,
+          });
+        }
+
+        for (const chunk of chunkPcm16(ttsRes.pcm16, relayOutputSampleRate)) {
+          audioChunksOut += 1;
+          sendEvent({ type: "audio_delta", audio: chunk.toString("base64") });
+        }
       }
 
+      mark(trace, "tts_done");
       log.info("tts complete", {
         traceId: trace.traceId,
         stage: "tts_done",
@@ -207,7 +283,7 @@ wss.on("connection", (socket: WebSocket) => {
         sessionId: session.id,
         responseId,
         audioChunksOut,
-        pcmBytes: ttsRes.pcm16.length,
+        pcmBytes: totalPcmBytes,
       });
     } catch (e) {
       log.warn("tts failed", {
@@ -403,7 +479,8 @@ wss.on("connection", (socket: WebSocket) => {
     }
   });
 
-  socket.on("close", () => {
+  socket.on("close", (code: number, reason: Buffer) => {
+    clearInterval(pingInterval);
     void supabaseMarkCallEnded(callSid);
     log.info("ws closed", {
       traceId: trace.traceId,
@@ -413,6 +490,8 @@ wss.on("connection", (socket: WebSocket) => {
       callSid,
       streamSid,
       audioChunksIn,
+      code,
+      reason: reason?.toString?.("utf8") || "",
     });
   });
 

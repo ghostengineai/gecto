@@ -5,6 +5,15 @@ export type BridgeConfig = {
   relayOutputSampleRate: number;
   commitSilenceMs: number;
   vadThreshold: number;
+  /**
+   * If the caller speaks continuously, force a commit after this many ms so ASR can start sooner.
+   * Set 0/undefined to disable.
+   */
+  maxUtteranceMs?: number;
+  /**
+   * If true, detect speech while we are playing outbound audio and interrupt Ragnar (barge-in).
+   */
+  bargeIn?: boolean;
   publicBaseUrl?: string;
   twilioWebhookPath: string;
   outboundStatusCallback?: string;

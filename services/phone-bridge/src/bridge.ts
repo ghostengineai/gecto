@@ -23,6 +23,8 @@ export type BridgeSession = {
   greeted: boolean;
   outboundPlan?: OutboundPlan;
   silenceMs: number;
+  /** Continuous speech duration (ms) since last commit. */
+  speechMs: number;
   lastSpeechAt: number;
   createdAt: number;
   audioInChunks: number;
@@ -133,6 +135,7 @@ export class PhoneBridgeManager {
       greeted: false,
       outboundPlan,
       silenceMs: 0,
+      speechMs: 0,
       lastSpeechAt: Date.now(),
       createdAt: Date.now(),
       audioInChunks: 0,
@@ -330,18 +333,38 @@ export class PhoneBridgeManager {
 
   private runVad(session: BridgeSession, samples: Int16Array) {
     const rms = computeRms(samples);
+
+    // If we are currently playing outbound audio and the user starts talking, interrupt (barge-in).
+    if (this.config.bargeIn && rms >= this.config.vadThreshold && session.outgoingMuLawBuffer.length > 0) {
+      log.info("barge-in interrupt", {
+        component: "phone-bridge",
+        traceId: session.trace.traceId,
+        stage: "barge_in",
+        ms: msSinceStart(session.trace),
+        streamSid: session.streamSid,
+      });
+      session.outgoingMuLawBuffer = Buffer.alloc(0);
+      this.interruptRelay(session);
+    }
+
     if (rms >= this.config.vadThreshold) {
       session.hasPendingAudio = true;
       session.silenceMs = 0;
+      session.speechMs += TWILIO_FRAME_MS;
       session.lastSpeechAt = Date.now();
+
+      const maxUtt = this.config.maxUtteranceMs ?? 0;
+      if (maxUtt > 0 && session.speechMs >= maxUtt) {
+        this.commit(session, "max_utterance");
+      }
       return;
     }
 
+    // silence
     session.silenceMs += TWILIO_FRAME_MS;
-    if (
-      session.hasPendingAudio &&
-      session.silenceMs >= this.config.commitSilenceMs
-    ) {
+    session.speechMs = 0;
+
+    if (session.hasPendingAudio && session.silenceMs >= this.config.commitSilenceMs) {
       this.commit(session, "silence");
     }
   }
@@ -369,6 +392,7 @@ export class PhoneBridgeManager {
   private commit(session: BridgeSession, reason: string, instructions?: string) {
     session.hasPendingAudio = false;
     session.silenceMs = 0;
+    session.speechMs = 0;
 
     mark(session.trace, `commit_${reason}`);
     this.dispatchToRelay(

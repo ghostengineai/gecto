@@ -15,6 +15,11 @@ const RELAY_INPUT_RATE = Number(process.env.RELAY_INPUT_SAMPLE_RATE ?? 16000);
 const RELAY_OUTPUT_RATE = Number(process.env.RELAY_OUTPUT_SAMPLE_RATE ?? 24000);
 const COMMIT_SILENCE_MS = Number(process.env.COMMIT_SILENCE_MS ?? 900);
 const VAD_THRESHOLD = Number(process.env.VAD_THRESHOLD ?? 0.012);
+const MAX_UTTERANCE_MS = Number(process.env.MAX_UTTERANCE_MS ?? 2500);
+const BARGE_IN = (() => {
+  const raw = (process.env.BARGE_IN ?? "1").trim().toLowerCase();
+  return !["0", "false", "no"].includes(raw);
+})();
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL;
 const PUBLIC_WS_URL = process.env.PUBLIC_WS_URL ?? PUBLIC_BASE_URL?.replace(/^http/, "ws");
 const TWILIO_WEBHOOK_PATH = process.env.TWILIO_WEBHOOK_PATH ?? "/twilio/voice";
@@ -47,6 +52,8 @@ const config: BridgeConfig = {
   relayOutputSampleRate: RELAY_OUTPUT_RATE,
   commitSilenceMs: COMMIT_SILENCE_MS,
   vadThreshold: VAD_THRESHOLD,
+  maxUtteranceMs: Number.isFinite(MAX_UTTERANCE_MS) ? MAX_UTTERANCE_MS : undefined,
+  bargeIn: BARGE_IN,
   publicBaseUrl: PUBLIC_BASE_URL,
   twilioWebhookPath: TWILIO_WEBHOOK_PATH,
   outboundStatusCallback: STATUS_CALLBACK_URL,
