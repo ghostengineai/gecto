@@ -1,7 +1,7 @@
 import WebSocket, { RawData } from "ws";
 import { v4 as uuid } from "uuid";
 import { decodeMuLaw, resampleLinear, int16ToBase64, encodeMuLaw, base64ToInt16, computeRms } from "./audio";
-import type { BridgeConfig, TwilioEvent, TwilioMediaEvent, TwilioStartEvent, TwilioDtmfEvent } from "./types";
+import type { BridgeConfig, OutboundPlan, TwilioEvent, TwilioMediaEvent, TwilioStartEvent, TwilioDtmfEvent } from "./types";
 
 const TWILIO_SAMPLE_RATE = 8000;
 const TWILIO_FRAME_MS = 20;
@@ -17,9 +17,13 @@ export type BridgeSession = {
   relaySendQueue: string[];
   outgoingMuLawBuffer: Buffer;
   hasPendingAudio: boolean;
+  greeted: boolean;
+  outboundPlan?: OutboundPlan;
   silenceMs: number;
   lastSpeechAt: number;
   createdAt: number;
+  audioInChunks: number;
+  audioOutChunks: number;
 };
 
 function isStreamEvent(event: TwilioEvent): event is TwilioEvent & { streamSid: string } {
@@ -28,8 +32,14 @@ function isStreamEvent(event: TwilioEvent): event is TwilioEvent & { streamSid: 
 
 export class PhoneBridgeManager {
   private sessions = new Map<string, BridgeSession>();
+  private outboundPlans = new Map<string, OutboundPlan>(); // callSid -> plan
 
   constructor(private readonly config: BridgeConfig) {}
+
+  public setOutboundPlan(callSid: string, plan: OutboundPlan) {
+    if (!callSid) return;
+    this.outboundPlans.set(callSid, plan);
+  }
 
   public handleTwilioSocket(ws: WebSocket) {
     ws.on("message", (data: RawData) => {
@@ -98,6 +108,8 @@ export class PhoneBridgeManager {
       return;
     }
 
+    const outboundPlan = this.outboundPlans.get(callSid);
+
     const session: BridgeSession = {
       streamSid,
       callSid,
@@ -106,9 +118,13 @@ export class PhoneBridgeManager {
       relaySendQueue: [],
       outgoingMuLawBuffer: Buffer.alloc(0),
       hasPendingAudio: false,
+      greeted: false,
+      outboundPlan,
       silenceMs: 0,
       lastSpeechAt: Date.now(),
       createdAt: Date.now(),
+      audioInChunks: 0,
+      audioOutChunks: 0,
     };
 
     this.sessions.set(streamSid, session);
@@ -151,6 +167,17 @@ export class PhoneBridgeManager {
       case "ready":
         session.relayReady = true;
         this.flushQueue(session);
+
+        // Outbound: speak first when we have an opener.
+        if (!session.greeted && session.outboundPlan?.openerText) {
+          session.greeted = true;
+          const callerName = session.outboundPlan.callerName?.trim() || "Ragnar";
+          const opener = session.outboundPlan.openerText.trim();
+          const instructions =
+            `You are ${callerName}. You placed this outbound phone call. ` +
+            `Say the following opener exactly (then stop and wait for a reply): ${JSON.stringify(opener)}.`;
+          this.dispatchToRelay(session, JSON.stringify({ type: "commit", instructions, reason: "outbound_greeting" }));
+        }
         break;
       case "audio_delta":
         this.pipeRelayAudioToTwilio(session, payload.audio as string);
@@ -167,6 +194,7 @@ export class PhoneBridgeManager {
   }
 
   private pipeRelayAudioToTwilio(session: BridgeSession, base64Audio: string) {
+    session.audioOutChunks += 1;
     const pcm = base64ToInt16(base64Audio);
     const downsampled = resampleLinear(
       pcm,
@@ -240,6 +268,7 @@ export class PhoneBridgeManager {
   }
 
   private sendAudioChunk(session: BridgeSession, samples: Int16Array) {
+    session.audioInChunks += 1;
     const relayPayload = JSON.stringify({
       type: "audio_chunk",
       audio: int16ToBase64(samples),
@@ -247,10 +276,13 @@ export class PhoneBridgeManager {
     this.dispatchToRelay(session, relayPayload);
   }
 
-  private commit(session: BridgeSession, reason: string) {
+  private commit(session: BridgeSession, reason: string, instructions?: string) {
     session.hasPendingAudio = false;
     session.silenceMs = 0;
-    this.dispatchToRelay(session, JSON.stringify({ type: "commit" }));
+    this.dispatchToRelay(
+      session,
+      JSON.stringify({ type: "commit", reason, instructions }),
+    );
     console.log(`[phone-bridge] commit (${reason}) for stream ${session.streamSid}`);
   }
 

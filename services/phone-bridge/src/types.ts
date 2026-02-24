@@ -12,6 +12,11 @@ export type BridgeConfig = {
   twilioValidation?: boolean;
 };
 
+export type OutboundPlan = {
+  openerText?: string;
+  callerName?: string;
+};
+
 export type TwilioStartEvent = {
   event: "start";
   start: {

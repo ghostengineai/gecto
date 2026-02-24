@@ -120,6 +120,8 @@ app.post("/api/call", requireApiToken, async (req, res) => {
 
   const to: string | undefined = req.body?.to;
   const from: string | undefined = req.body?.from ?? TWILIO_CALLER_ID ?? undefined;
+  const openerText: string | undefined = req.body?.openerText;
+  const callerName: string | undefined = req.body?.callerName;
   if (!to) {
     return res.status(400).json({ error: "Missing 'to' number" });
   }
@@ -140,6 +142,14 @@ app.post("/api/call", requireApiToken, async (req, res) => {
         ? ["initiated", "ringing", "answered", "completed"]
         : undefined,
     });
+
+    // Store an optional outbound plan so Ragnar can speak first when the callee answers.
+    if (openerText || callerName) {
+      bridgeManager.setOutboundPlan(call.sid, {
+        openerText: typeof openerText === "string" ? openerText : undefined,
+        callerName: typeof callerName === "string" ? callerName : undefined,
+      });
+    }
 
     res.json({ ok: true, callSid: call.sid });
   } catch (error) {

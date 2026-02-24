@@ -1,0 +1,7 @@
+{
+  "requireConfirm": true,
+  "allowlist": [
+    "+1"
+  ],
+  "defaultCallerName": "Ragnar"
+}
