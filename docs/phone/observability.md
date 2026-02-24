@@ -67,6 +67,49 @@ Ragnar backend v2:
 - `response_completed`
 - `ws_closed`
 
+## Supabase call transcript logging (optional)
+
+`services/ragnar-backend-v2` can optionally write call metadata + per-turn transcripts/responses to Supabase.
+
+- Feature flag: `SUPABASE_LOG_CALLS=1`
+- Credentials (server-only):
+  - `SUPABASE_URL`
+  - `SUPABASE_SERVICE_ROLE_KEY`
+
+Schema: see `docs/sql/calls.sql`.
+
+**Privacy:**
+
+- Only stores *text* (transcript + assistant response).
+- Audio is never stored.
+- Text fields are truncated server-side.
+
+## Listen-in UI (optional)
+
+The Next.js app includes a lightweight listen-in page:
+
+- Route: `/admin/calls/[callSid]`
+- Protected by existing `BASIC_AUTH_USERNAME` + `BASIC_AUTH_PASSWORD` middleware.
+- Optional extra guard: set `ADMIN_TOKEN` and open `/admin/calls/<CALL_SID>?token=<ADMIN_TOKEN>`.
+
+The UI polls `GET /api/admin/calls/[callSid]/turns` every ~2s and (if configured) also subscribes to Supabase Realtime.
+
+### Env vars
+
+Backend (Render / Docker / etc):
+
+- `SUPABASE_LOG_CALLS=1`
+- `SUPABASE_URL=...`
+- `SUPABASE_SERVICE_ROLE_KEY=...`
+
+Next.js app (Vercel):
+
+- `SUPABASE_URL=...`
+- `SUPABASE_SERVICE_ROLE_KEY=...` (server-only)
+- `NEXT_PUBLIC_SUPABASE_URL=...` (optional, enables Realtime subscription)
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY=...` (optional, enables Realtime subscription)
+- `ADMIN_TOKEN=...` (optional)
+
 ## Redaction / privacy
 
 Logs are **best-effort redacted**:
