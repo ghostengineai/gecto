@@ -42,16 +42,20 @@ export class WhisperCppAsr implements AsrModule {
     try {
       await writeWav16kMono(wavPath, pcm16);
 
-      // whisper.cpp main usage varies by commit; these flags are widely supported.
+      // whisper.cpp main CLI flags change across commits.
+      // Prefer short flags that have been stable for a long time:
+      //   -oj : output JSON
+      //   -of : output file base path
+      //   -nt : no timestamps
       const args = [
         "-m",
         this.opts.modelPath,
         "-f",
         wavPath,
-        "--output-json",
-        "--output-file",
+        "-oj",
+        "-of",
         outBase,
-        "--no-timestamps",
+        "-nt",
       ];
 
       const started = Date.now();
@@ -59,8 +63,9 @@ export class WhisperCppAsr implements AsrModule {
       const elapsedMs = Date.now() - started;
 
       if (res.code !== 0) {
-        log.warn("whisper.cpp exited non-zero", { code: res.code, stderr: res.stderr.slice(0, 500) });
-        throw new Error(`whisper.cpp failed (code ${res.code})`);
+        const stderrPreview = (res.stderr ?? "").slice(0, 800);
+        log.warn("whisper.cpp exited non-zero", { code: res.code, stderr: stderrPreview });
+        throw new Error(`whisper.cpp failed (code ${res.code}): ${stderrPreview || "(no stderr)"}`);
       }
 
       const jsonRaw = await fs.readFile(outJson, "utf8");
