@@ -2,6 +2,8 @@
 
 # dependencies
 /node_modules
+node_modules/
+services/*/node_modules/
 /.pnp
 .pnp.*
 .yarn/*
@@ -9,6 +11,10 @@
 !.yarn/plugins
 !.yarn/releases
 !.yarn/versions
+
+# build artifacts
+services/*/dist/
+dist/
 
 # testing
 /coverage
@@ -29,6 +35,9 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+logs/
+services/*/logs/
+*.log
 
 # env files (can opt-in for committing if needed)
 .env*
