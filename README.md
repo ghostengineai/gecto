@@ -1,38 +1,48 @@
 # Voice Bridge App
 
-Next.js client for the Ragnar voice bridge. It creates short-lived OpenAI Realtime sessions, performs the WebRTC handshake directly from the browser, and relays audio in both directions.
+Next.js client for the Ragnar voice bridge. It now streams audio through the local `services/voice-relay-server` via WebSockets, letting browsers participate in the same relay used by the phone + PSTN bridges.
 
 ## Getting Started
 
 ### Local dev
 
 ```bash
+# Terminal 1 – relay (streams audio to OpenAI)
+cd services/voice-relay-server
 npm install
-OPENAI_API_KEY=sk-... npm run dev
+npm run dev
+
+# Terminal 2 – Next.js client
+cd projects/voice-bridge-app
+npm install
+npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) and click **Connect**. Grant mic permission once and you’ll have a live, full-duplex call. Use **Hang Up** to end the session.
+Set `NEXT_PUBLIC_VOICE_RELAY_URL` (or rely on the default `ws://localhost:5050/relay`), open [http://localhost:3000](http://localhost:3000), and click **Connect**. Grant mic permission once and you’ll have a live, full-duplex call through the relay. Use **Hang Up** to end the session.
 
-### Required environment variables
+### Environment variables
 
 | Variable | Scope | Description |
 | --- | --- | --- |
-| `OPENAI_API_KEY` | server | Project key with Realtime access used by `/api/realtime-token` |
-| `OPENAI_REALTIME_MODEL` | server (optional) | Overrides the model for the minted session |
-| `NEXT_PUBLIC_OPENAI_REALTIME_MODEL` | client (optional) | Forces a client-side model if none returned |
-| `NEXT_PUBLIC_OPENAI_REALTIME_CONNECT_URL` | client (optional) | Override if you proxy `/connect` |
+| `NEXT_PUBLIC_VOICE_RELAY_URL` | client | WebSocket URL for `voice-relay-server` (default `ws://localhost:5050/relay`) |
+| `NEXT_PUBLIC_VOICE_RELAY_TOKEN` | client (optional) | Token appended as `?token=...` for relays that require auth |
+| `NEXT_PUBLIC_RELAY_INPUT_SAMPLE_RATE` | client (optional) | Sample rate sent to relay (default `16000`) |
+| `NEXT_PUBLIC_RELAY_OUTPUT_SAMPLE_RATE` | client (optional) | Sample rate expected from relay audio (default `24000`) |
+| `NEXT_PUBLIC_RELAY_CHUNK_MS` | client (optional) | Size of PCM chunks forwarded to relay (default `20` ms) |
+| `NEXT_PUBLIC_VAD_THRESHOLD` | client (optional) | RMS threshold for detecting speech (default `0.012`) |
+| `NEXT_PUBLIC_COMMIT_SILENCE_MS` | client (optional) | Silence duration before auto `commit` (default `900` ms) |
 | `BASIC_AUTH_USERNAME` | edge (middleware) | Username required to load the app |
 | `BASIC_AUTH_PASSWORD` | edge (middleware) | Password required to load the app |
 
 If the BASIC auth vars are unset, the app is public; set them before deploying so only you can connect.
 
-## Realtime WebRTC Notes
+## Voice Relay Workflow
 
-1. **Token minting** happens server-side inside `src/app/api/realtime-token/route.ts` by calling `https://api.openai.com/v1/realtime/sessions`. The response contains the `client_secret.value` (ephemeral token) plus the negotiated model.
-2. **Client connect** uses that token to call the dedicated `/v1/realtime/connect` endpoint: see `src/app/page.tsx`. The URL defaults to `https://api.openai.com/v1/realtime/connect?model=gpt-4o-realtime-preview-2024-12-17` and can be overridden via env vars.
-3. **SDP exchange**: we create an offer, set it locally, POST `Content-Type: application/sdp` to `/connect`, and immediately apply the returned SDP answer. Errors bubble into the UI so we can see when the handshake fails.
-4. **Audio streams**: microphone tracks are added to the peer connection and we explicitly create a recv-only transceiver to guarantee the remote audio leg. Incoming `track` events wire up to a hidden `<audio>` element so we get full-duplex audio once the connection hits `connected`.
-5. **Status lifecycle**: failures leave the UI in the `error` state instead of resetting to `idle`, making it obvious when SDP or media setup needs attention.
+1. **Browser ↔ relay WebSocket**: `src/app/page.tsx` opens `NEXT_PUBLIC_VOICE_RELAY_URL`, queues microphone PCM16 frames (`audio_chunk`), and listens for Ragnar transcripts + audio.
+2. **PCM capture**: the mic stream runs through the Web Audio API. Samples are converted to `Int16`, resampled to `NEXT_PUBLIC_RELAY_INPUT_SAMPLE_RATE`, batched into `NEXT_PUBLIC_RELAY_CHUNK_MS`, and base64-encoded before hitting `/relay`.
+3. **Auto commit via VAD**: a lightweight RMS-based detector mirrors the phone bridge. After `NEXT_PUBLIC_COMMIT_SILENCE_MS` of silence, we send `{ type: "commit" }` so Ragnar responds naturally without button presses.
+4. **Playback**: incoming `audio_delta` payloads are decoded back into PCM, queued inside an `AudioContext`, and played immediately. `text_delta`/`transcript` events drive the on-screen captions.
+5. **Hang up**: clicking **Hang Up** sends `{ type: "end" }` to the relay and tears down the audio graph/WebSocket.
 
 ## Deployment (permanent, secure URL)
 
@@ -47,19 +57,19 @@ If the BASIC auth vars are unset, the app is public; set them before deploying s
    - `vercel login`
    - `vercel` (first deploy) – select this folder, accept build defaults.
 3. **Set environment variables in Vercel**
-   - `OPENAI_API_KEY`
-   - `OPENAI_REALTIME_MODEL` (optional)
+   - `NEXT_PUBLIC_VOICE_RELAY_URL`
+   - `NEXT_PUBLIC_VOICE_RELAY_TOKEN` (if your relay expects a token)
    - `BASIC_AUTH_USERNAME`, `BASIC_AUTH_PASSWORD`
 4. **Deploy**
    - `vercel --prod`
    - Result: `https://your-project.vercel.app` (TLS by default).
 
-For extra security you can later attach a custom domain (`voice.yourdomain.com`), wrap the app with Vercel password protection, or put it behind Cloudflare Zero Trust/Tailscale. The middleware-based BASIC auth already prevents random access.
+Make sure the relay is reachable from the deployed app (public `wss://` URL, optional auth token). For extra security you can wrap the relay itself with firewall rules, Cloudflare Zero Trust, or JWT verification.
 
 ## Learn More
 
 - [Next.js Documentation](https://nextjs.org/docs)
-- [OpenAI Realtime reference](https://platform.openai.com/docs/guides/realtime)
+- [`voice-relay-server` README](../../services/voice-relay-server/README.md)
 
 ## Scripts
 
