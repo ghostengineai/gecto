@@ -109,6 +109,16 @@ Telnyx Call Control WebRTC streams expose the same μ-law audio payloads. To sup
 - Mirror the Twilio webhook with Call Control instructions to start streaming audio to the bridge.
 - Re-use `PhoneBridgeManager` by abstracting the media adapter (Twilio vs Telnyx) so both produce/consume the same internal events.
 
+## Inspecting Twilio config (debug)
+
+If you suspect Twilio is not hitting the webhook you think it is (TwiML App vs direct webhook), run:
+
+```bash
+node scripts/inspect-twilio.mjs
+```
+
+This prints the incoming phone numbers on the account and, for each number, the effective voice webhook (`voiceUrl`) or `voiceApplicationSid` (and the App’s `voiceUrl` if present).
+
 ## Observability
 
 `phone-bridge` emits structured JSON logs with a per-call `traceId` (seeded from Twilio `callSid`).
