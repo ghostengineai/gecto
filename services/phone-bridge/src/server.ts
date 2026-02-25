@@ -99,15 +99,14 @@ twilioRouter.post(
 
     const response = new twiml.VoiceResponse();
 
-    // Use <Start><Stream> so Twilio can provide both tracks when configured.
-    // (We still send outbound audio frames back over the same WS.)
-    response.start().stream({
+    // Bidirectional Media Streams: Twilio streams caller audio to us over WS,
+    // and we can send synthesized audio back over the same WS as outbound media frames.
+    // Keep the TwiML minimal to match Twilio's expected bidirectional pattern.
+    const connect = response.connect();
+    connect.stream({
       url: streamUrl.toString(),
-      track: "both_tracks" as any,
+      // Omit `track` to use Twilio defaults (inbound). Some configurations are picky here.
     });
-
-    // Keep the call alive. The bridge handles the audio; no <Say> here.
-    response.pause({ length: 600 });
 
     res.type("text/xml").send(response.toString());
   },
