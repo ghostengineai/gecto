@@ -16,7 +16,7 @@ import {
 } from "./services/supabaseLog";
 
 const relayInputSampleRate = Number(process.env.RELAY_INPUT_SAMPLE_RATE ?? 16000);
-const relayOutputSampleRate = Number(process.env.RELAY_OUTPUT_SAMPLE_RATE ?? 24000);
+const defaultRelayOutputSampleRate = Number(process.env.RELAY_OUTPUT_SAMPLE_RATE ?? 24000);
 
 import { log } from "./util/log";
 import { createTrace, mark, msSinceStart } from "./util/trace";
@@ -52,7 +52,7 @@ const tts = new PiperTts({
   modelPath: PIPER_MODEL_PATH ?? "",
   configPath: PIPER_CONFIG_PATH ?? "",
   ffmpegPath: FFMPEG_BIN,
-  outputSampleRate: relayOutputSampleRate,
+  outputSampleRate: defaultRelayOutputSampleRate,
 });
 
 const app = express();
@@ -68,7 +68,7 @@ app.get("/healthz", async (_req, res) => {
     port: PORT,
     relay: {
       inputSampleRate: relayInputSampleRate,
-      outputSampleRate: relayOutputSampleRate,
+      outputSampleRate: defaultRelayOutputSampleRate,
     },
   });
 });
@@ -77,14 +77,22 @@ const server = createServer(app);
 const wss = new WebSocketServer({ server, path: "/relay" });
 
 type ClientMessage =
-  | { type: "start"; traceId?: string; callSid?: string; streamSid?: string; startedAt?: number }
+  | {
+      type: "start";
+      traceId?: string;
+      callSid?: string;
+      streamSid?: string;
+      startedAt?: number;
+      inputSampleRate?: number;
+      outputSampleRate?: number;
+    }
   | { type: "audio_chunk"; audio: string; traceId?: string }
   | { type: "commit"; instructions?: string; traceId?: string; reason?: string }
   | { type: "text"; text: string; traceId?: string }
   | { type: "end"; traceId?: string };
 
 type RelayEvent =
-  | { type: "ready" }
+  | { type: "ready"; inputSampleRate: number; outputSampleRate: number }
   | { type: "error"; error: string }
   | { type: "text_delta"; text: string }
   | { type: "text_completed"; text: string }
@@ -101,6 +109,9 @@ wss.on("connection", (socket: WebSocket) => {
   let streamSid: string | undefined;
   let audioChunksIn = 0;
   let turnIndex = 0;
+
+  // Allow per-call output sample rate (e.g. 8000Hz for phone).
+  let relayOutputSampleRate = defaultRelayOutputSampleRate;
 
   if (supabaseLoggingEnabled()) {
     log.info("supabase call logging enabled", {
@@ -125,6 +136,21 @@ wss.on("connection", (socket: WebSocket) => {
 
   const handleTurnFromText = async (userText: string, instructions?: string) => {
     const transcript = userText.trim();
+
+    // Skip silence/no-speech turns.
+    if (!transcript) {
+      const responseId = `resp_${randomUUID().slice(0, 10)}`;
+      log.info("empty transcript: skipping response", {
+        traceId: trace.traceId,
+        stage: "empty_transcript",
+        ms: msSinceStart(trace),
+        sessionId: session.id,
+        responseId,
+      });
+      sendEvent({ type: "response_completed", responseId });
+      return;
+    }
+
     sendEvent({ type: "transcript", text: transcript });
 
     mark(trace, "llm_start");
@@ -170,18 +196,58 @@ wss.on("connection", (socket: WebSocket) => {
     }
     sendEvent({ type: "text_completed", text: response.text });
 
-    // synthesize after text is complete (keeps implementation simple)
+    // Reduce time-to-first-audio by synthesizing in chunks.
+    const splitForTts = (text: string): string[] => {
+      const t = text.trim();
+      if (!t) return [];
+      const sentences = t.split(/(?<=[.!?])\s+/g);
+      const chunks: string[] = [];
+      let cur = "";
+      const maxLen = 180;
+      for (const s of sentences) {
+        const next = cur ? `${cur} ${s}` : s;
+        if (next.length > maxLen && cur) {
+          chunks.push(cur);
+          cur = s;
+        } else {
+          cur = next;
+        }
+      }
+      if (cur) chunks.push(cur);
+      return chunks;
+    };
+
     try {
       mark(trace, "tts_start");
-      const ttsRes = await tts.synthesize(response.text);
-      mark(trace, "tts_done");
-
       let audioChunksOut = 0;
-      for (const chunk of chunkPcm16(ttsRes.pcm16, relayOutputSampleRate)) {
-        audioChunksOut += 1;
-        sendEvent({ type: "audio_delta", audio: chunk.toString("base64") });
+      let totalPcmBytes = 0;
+      let partIndex = 0;
+
+      for (const part of splitForTts(response.text)) {
+        partIndex += 1;
+        const ttsRes = await tts.synthesize(part, relayOutputSampleRate);
+        totalPcmBytes += ttsRes.pcm16.length;
+
+        if (partIndex === 1) {
+          mark(trace, "tts_first_audio");
+          log.info("tts first audio", {
+            traceId: trace.traceId,
+            stage: "tts_first_audio",
+            ms: msSinceStart(trace),
+            sessionId: session.id,
+            responseId,
+            partLen: part.length,
+            relayOutputSampleRate,
+          });
+        }
+
+        for (const chunk of chunkPcm16(ttsRes.pcm16, relayOutputSampleRate)) {
+          audioChunksOut += 1;
+          sendEvent({ type: "audio_delta", audio: chunk.toString("base64") });
+        }
       }
 
+      mark(trace, "tts_done");
       log.info("tts complete", {
         traceId: trace.traceId,
         stage: "tts_done",
@@ -189,7 +255,8 @@ wss.on("connection", (socket: WebSocket) => {
         sessionId: session.id,
         responseId,
         audioChunksOut,
-        pcmBytes: ttsRes.pcm16.length,
+        pcmBytes: totalPcmBytes,
+        relayOutputSampleRate,
       });
     } catch (e) {
       log.warn("tts failed", {
@@ -282,7 +349,11 @@ wss.on("connection", (socket: WebSocket) => {
   });
   // Backwards-compatible: clients ignoring extra fields are fine.
   mark(trace, "ready_sent");
-  sendEvent({ type: "ready", inputSampleRate: relayInputSampleRate, outputSampleRate: relayOutputSampleRate } as any);
+  sendEvent({
+    type: "ready",
+    inputSampleRate: relayInputSampleRate,
+    outputSampleRate: relayOutputSampleRate,
+  });
   log.debug("ready sent", {
     traceId: trace.traceId,
     stage: "ready_sent",
@@ -304,6 +375,16 @@ wss.on("connection", (socket: WebSocket) => {
           if (payload.traceId && payload.traceId.trim()) trace.traceId = payload.traceId.trim();
           callSid = payload.callSid ?? callSid;
           streamSid = payload.streamSid ?? streamSid;
+
+          // Negotiate per-call output sample rate (phone can request 8000Hz).
+          const allowedOutputRates = new Set([8000, 16000, 24000]);
+          const requestedOutputSampleRate = payload.outputSampleRate;
+          if (typeof requestedOutputSampleRate === "number" && allowedOutputRates.has(requestedOutputSampleRate)) {
+            relayOutputSampleRate = requestedOutputSampleRate;
+          } else {
+            relayOutputSampleRate = defaultRelayOutputSampleRate;
+          }
+
           mark(trace, "start_received");
           log.info("start received", {
             traceId: trace.traceId,
@@ -312,6 +393,15 @@ wss.on("connection", (socket: WebSocket) => {
             sessionId: session.id,
             callSid,
             streamSid,
+            requestedOutputSampleRate,
+            relayOutputSampleRate,
+          });
+
+          // Re-advertise negotiated rates (backwards-compatible for clients that ignore extra fields).
+          sendEvent({
+            type: "ready",
+            inputSampleRate: relayInputSampleRate,
+            outputSampleRate: relayOutputSampleRate,
           });
 
           void supabaseUpsertCall({

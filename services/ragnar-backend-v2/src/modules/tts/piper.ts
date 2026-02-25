@@ -46,7 +46,7 @@ export class PiperTts implements TtsModule {
     }
   }
 
-  async synthesize(text: string): Promise<TtsResult> {
+  async synthesize(text: string, outputSampleRate?: number): Promise<TtsResult> {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "ragnar-tts-"));
     const id = randomUUID().slice(0, 8);
     const wavPath = path.join(tmpDir, `piper_${id}.wav`);
@@ -83,7 +83,7 @@ export class PiperTts implements TtsModule {
           "-ac",
           "1",
           "-ar",
-          String(this.opts.outputSampleRate),
+          String(outputSampleRate ?? this.opts.outputSampleRate),
           "-f",
           "s16le",
           pcmPath,

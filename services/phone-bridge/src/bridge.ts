@@ -164,6 +164,8 @@ export class PhoneBridgeManager {
           callSid: session.callSid,
           streamSid: session.streamSid,
           startedAt: session.trace.startedAt,
+          inputSampleRate: this.config.relayInputSampleRate,
+          outputSampleRate: this.config.relayOutputSampleRate,
         }),
       );
     });
