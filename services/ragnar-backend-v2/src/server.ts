@@ -311,12 +311,15 @@ wss.on("connection", (socket: WebSocket) => {
 
   const handleCommit = async (instructions?: string) => {
     if (inFlight) {
-      // Avoid interleaving responses if multiple commits arrive quickly (VAD + DTMF).
+      // Avoid interleaving responses if multiple commits arrive quickly.
+      // Critical: drop buffered audio so we don't accumulate minutes of PCM while ASR is running.
+      const droppedBytes = consumeBufferedAudio(session).length;
       log.warn("commit ignored: turn already in flight", {
         traceId: trace.traceId,
         stage: "commit_ignored",
         ms: msSinceStart(trace),
         sessionId: session.id,
+        droppedBytes,
       });
       return;
     }

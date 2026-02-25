@@ -101,7 +101,29 @@ export class WhisperCppAsr implements AsrModule {
 
       const jsonRaw = await fs.readFile(outJson, "utf8");
       const parsed = JSON.parse(jsonRaw) as any;
-      const text = String(parsed?.transcription ?? parsed?.text ?? "").trim();
+
+      // whisper.cpp JSON schema varies across builds.
+      // Avoid String(object) -> "[object Object]" by extracting the actual text.
+      const coerceText = (v: any): string => {
+        if (!v) return "";
+        if (typeof v === "string") return v;
+        if (Array.isArray(v)) {
+          // e.g. [{text:"..."}, ...]
+          return v
+            .map((x) => (typeof x === "string" ? x : typeof x?.text === "string" ? x.text : ""))
+            .join(" ")
+            .trim();
+        }
+        if (typeof v === "object") {
+          if (typeof v.text === "string") return v.text;
+          if (Array.isArray(v.segments)) {
+            return v.segments.map((s: any) => String(s?.text ?? "").trim()).filter(Boolean).join(" ");
+          }
+        }
+        return "";
+      };
+
+      const text = coerceText(parsed?.transcription) || coerceText(parsed?.text) || "";
 
       // segments are optional / schema differs; best-effort
       const segments = Array.isArray(parsed?.transcription_segments)
@@ -114,7 +136,14 @@ export class WhisperCppAsr implements AsrModule {
             .filter((s: any) => s.text)
         : undefined;
 
-      log.info("asr transcribed", { bytes: pcm16.length, elapsedMs, textPreview: text.slice(0, 80) });
+      log.info("asr transcribed", {
+        bytes: pcm16.length,
+        elapsedMs,
+        textPreview: text.slice(0, 80),
+        schemaKeys: parsed && typeof parsed === "object" ? Object.keys(parsed).slice(0, 20) : undefined,
+        transcriptionType: typeof parsed?.transcription,
+        textType: typeof parsed?.text,
+      });
 
       return { text, segments };
     } finally {
