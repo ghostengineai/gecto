@@ -308,20 +308,47 @@ export class PhoneBridgeManager {
       return;
     }
 
-    // Twilio expects outbound audio frames over the same WS as "media" events.
-    // Keep the payload minimal; some Twilio configurations ignore unexpected fields.
+    // Minimal outbound media injection frame. Some Twilio configurations ignore unexpected fields.
+    const payload = frame.toString("base64");
+
+    // Lightweight instrumentation to prove we are sending outbound frames.
+    // (Do NOT log the payload itself.)
+    if (session.audioOutChunks === 1) {
+      log.info("first outbound audio frame queued", {
+        component: "phone-bridge",
+        traceId: session.trace.traceId,
+        stage: "twilio_outbound_first_frame",
+        ms: msSinceStart(session.trace),
+        streamSid: session.streamSid,
+      });
+    }
+
     session.twilioSocket.send(
       JSON.stringify({
         event: "media",
         streamSid: session.streamSid,
         media: {
-          payload: frame.toString("base64"),
+          payload,
         },
       }),
     );
   }
 
   private handleMedia(session: BridgeSession, event: TwilioMediaEvent) {
+    // Log the first inbound media event metadata to confirm what Twilio is sending us.
+    if (session.audioInChunks === 0) {
+      log.info("first inbound media frame", {
+        component: "phone-bridge",
+        traceId: session.trace.traceId,
+        stage: "twilio_inbound_first_frame",
+        ms: msSinceStart(session.trace),
+        streamSid: session.streamSid,
+        track: event.media.track ?? null,
+        chunk: event.media.chunk ?? null,
+        timestamp: event.media.timestamp ?? null,
+      });
+    }
+
     const samples8k = decodeMuLaw(event.media.payload);
     const samplesTarget = resampleLinear(
       samples8k,
