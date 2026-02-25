@@ -190,7 +190,8 @@ describe("PhoneBridgeManager", () => {
 
     await waitFor(() => twilioMessages.some((msg) => msg.event === "media"));
     const outboundFrame = twilioMessages.find((msg) => msg.event === "media");
-    expect(outboundFrame.media.track).toBe("outbound");
+    // Outbound injected frames should be minimal; do not require a track field.
+    expect(outboundFrame.media.payload).toBeTypeOf("string");
     const payloadBuffer = Buffer.from(outboundFrame.media.payload, "base64");
     expect(payloadBuffer.length).toBe(160);
 

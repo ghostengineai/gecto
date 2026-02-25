@@ -89,7 +89,7 @@ twilioRouter.use(bodyParser.urlencoded({ extended: false }));
 twilioRouter.post(
   TWILIO_WEBHOOK_PATH,
   maybeValidateTwilio,
-  (req: Request, res: Response) => {
+  (_req: Request, res: Response) => {
     if (!PUBLIC_WS_URL) {
       return res.status(500).send("Missing PUBLIC_WS_URL");
     }
@@ -98,13 +98,16 @@ twilioRouter.post(
     streamUrl.pathname = TWILIO_STREAM_PATH;
 
     const response = new twiml.VoiceResponse();
-    const connect = response.connect();
-    // Twilio <Connect><Stream> supports track="inbound_track". (both_tracks is for <Start><Stream>)
-    // Outbound audio is still delivered by sending media frames back over the same WS.
-    connect.stream({
+
+    // Use <Start><Stream> so Twilio can provide both tracks when configured.
+    // (We still send outbound audio frames back over the same WS.)
+    response.start().stream({
       url: streamUrl.toString(),
-      track: "inbound_track",
+      track: "both_tracks" as any,
     });
+
+    // Keep the call alive. The bridge handles the audio; no <Say> here.
+    response.pause({ length: 600 });
 
     res.type("text/xml").send(response.toString());
   },

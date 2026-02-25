@@ -308,13 +308,14 @@ export class PhoneBridgeManager {
       return;
     }
 
+    // Twilio expects outbound audio frames over the same WS as "media" events.
+    // Keep the payload minimal; some Twilio configurations ignore unexpected fields.
     session.twilioSocket.send(
       JSON.stringify({
         event: "media",
         streamSid: session.streamSid,
         media: {
           payload: frame.toString("base64"),
-          track: "outbound",
         },
       }),
     );
