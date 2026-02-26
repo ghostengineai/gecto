@@ -149,7 +149,9 @@ describe("PhoneBridgeManager", () => {
     );
 
     await delay(50);
-    expect(relayMessages).toHaveLength(0);
+    // We now send `start` immediately on relay WS open so it always arrives before audio/commit.
+    // The important behavior is that audio is buffered until relay is ready.
+    expect(relayMessages.some((m) => m.type === "audio_chunk")).toBe(false);
 
     relaySocket!.send(JSON.stringify({ type: "ready" }));
 

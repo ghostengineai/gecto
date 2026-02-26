@@ -16,8 +16,17 @@ export type BridgeSession = {
   twilioSocket: WebSocket;
   relaySocket?: WebSocket;
   relayId?: string;
+
+  /** Relay protocol / flow control */
   relayReady: boolean;
+  startSent: boolean;
+  /** Queue for non-audio messages while relay is not ready (e.g. "end"). */
   relaySendQueue: string[];
+  /** Buffer audio chunks received before relay is ready. */
+  preReadyAudioChunks: string[];
+  /** If VAD fires before relay is ready, collapse into a single pending commit. */
+  pendingCommit?: { reason: string; instructions?: string };
+
   outgoingMuLawBuffer: Buffer;
   hasPendingAudio: boolean;
   greeted: boolean;
@@ -128,8 +137,13 @@ export class PhoneBridgeManager {
       callSid,
       trace,
       twilioSocket: ws,
+
       relayReady: false,
+      startSent: false,
       relaySendQueue: [],
+      preReadyAudioChunks: [],
+      pendingCommit: undefined,
+
       outgoingMuLawBuffer: Buffer.alloc(0),
       hasPendingAudio: false,
       greeted: false,
@@ -170,16 +184,8 @@ export class PhoneBridgeManager {
       });
 
       // Backwards-compatible: servers not expecting this can ignore it.
-      this.dispatchToRelay(
-        session,
-        JSON.stringify({
-          type: "start",
-          traceId: session.trace.traceId,
-          callSid: session.callSid,
-          streamSid: session.streamSid,
-          startedAt: session.trace.startedAt,
-        }),
-      );
+      // IMPORTANT: `start` must be sent before any queued audio/commit events.
+      this.sendStartToRelay(session);
     });
 
     relay.on("message", (data: RawData) => {
@@ -244,10 +250,30 @@ export class PhoneBridgeManager {
           stage: "relay_ready",
           ms: msSinceStart(session.trace),
           streamSid: session.streamSid,
+          preReadyAudioChunks: session.preReadyAudioChunks.length,
+          hadPendingCommit: Boolean(session.pendingCommit),
         });
+
+        // Ensure `start` has been sent before we flush anything else.
+        this.sendStartToRelay(session);
+
+        // Flush buffered audio first, then any non-audio queued messages.
+        this.flushPreReadyAudio(session);
         this.flushQueue(session);
 
+        // If VAD fired before relay was ready, send exactly one commit now.
+        if (session.pendingCommit) {
+          const { reason, instructions } = session.pendingCommit;
+          session.pendingCommit = undefined;
+          this.dispatchToRelay(
+            session,
+            JSON.stringify({ type: "commit", traceId: session.trace.traceId, reason, instructions }),
+          );
+        }
+
         // Outbound: speak first when we have an opener.
+        // NOTE: This is a commit. If the backend is already processing a turn, it will ignore it.
+        // We keep this after pre-ready commit flush so greeting doesn't get dropped behind a user turn.
         if (!session.greeted && session.outboundPlan?.openerText) {
           session.greeted = true;
           const callerName = session.outboundPlan.callerName?.trim() || "Ragnar";
@@ -255,7 +281,10 @@ export class PhoneBridgeManager {
           const instructions =
             `You are ${callerName}. You placed this outbound phone call. ` +
             `Say the following opener exactly (then stop and wait for a reply): ${JSON.stringify(opener)}.`;
-          this.dispatchToRelay(session, JSON.stringify({ type: "commit", instructions, reason: "outbound_greeting" }));
+          this.dispatchToRelay(
+            session,
+            JSON.stringify({ type: "commit", traceId: session.trace.traceId, instructions, reason: "outbound_greeting" }),
+          );
         }
         break;
       case "audio_delta":
@@ -414,6 +443,19 @@ export class PhoneBridgeManager {
       audio: int16ToBase64(samples),
       traceId: session.trace.traceId,
     });
+
+    // Avoid mixing pre-ready audio with control messages like `start`/`commit`.
+    // Buffer a small amount of audio until the relay is ready.
+    if (!session.relayReady) {
+      // Cap to ~10 seconds at 20ms frames => 500 chunks.
+      const MAX = 500;
+      if (session.preReadyAudioChunks.length >= MAX) {
+        session.preReadyAudioChunks.shift();
+      }
+      session.preReadyAudioChunks.push(relayPayload);
+      return;
+    }
+
     this.dispatchToRelay(session, relayPayload);
   }
 
@@ -423,6 +465,21 @@ export class PhoneBridgeManager {
     session.speechMs = 0;
 
     mark(session.trace, `commit_${reason}`);
+
+    // If relay isn't ready yet, collapse commits into a single pending commit.
+    if (!session.relayReady) {
+      session.pendingCommit = { reason, instructions };
+      log.info("commit (buffered; relay not ready)", {
+        component: "phone-bridge",
+        traceId: session.trace.traceId,
+        stage: "commit_buffered",
+        ms: msSinceStart(session.trace),
+        streamSid: session.streamSid,
+        reason,
+      });
+      return;
+    }
+
     this.dispatchToRelay(
       session,
       JSON.stringify({ type: "commit", traceId: session.trace.traceId, reason, instructions }),
@@ -447,6 +504,35 @@ export class PhoneBridgeManager {
     } else {
       session.relaySendQueue.push(payload);
     }
+  }
+
+  private sendStartToRelay(session: BridgeSession) {
+    if (session.startSent) return;
+    if (!session.relaySocket || session.relaySocket.readyState !== WebSocket.OPEN) return;
+
+    const payload = JSON.stringify({
+      type: "start",
+      traceId: session.trace.traceId,
+      callSid: session.callSid,
+      streamSid: session.streamSid,
+      startedAt: session.trace.startedAt,
+    });
+
+    session.relaySocket.send(payload);
+    session.startSent = true;
+  }
+
+  private flushPreReadyAudio(session: BridgeSession) {
+    if (!session.relayReady || session.relaySocket?.readyState !== WebSocket.OPEN) return;
+    if (!session.preReadyAudioChunks.length) return;
+
+    // Safety: do not flush audio unless we've already sent start.
+    this.sendStartToRelay(session);
+
+    for (const payload of session.preReadyAudioChunks) {
+      session.relaySocket.send(payload);
+    }
+    session.preReadyAudioChunks = [];
   }
 
   private flushQueue(session: BridgeSession) {
