@@ -284,14 +284,19 @@ wss.on('connection', (clientWs) => {
 
       case 'audio_chunk': {
         // Append raw audio to OpenAI input buffer.
-        openaiWs.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: msg.audio }));
+        const b64 = msg.audio || '';
+        openaiWs.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: b64 }));
 
         // Track how much audio we have so commit doesn't fail on short buffers.
-        // base64 → bytes (approx exact for valid b64)
-        const b64 = msg.audio || '';
         const bytes = Math.floor((b64.length * 3) / 4);
         const ms = (bytes / (2 * INPUT_SAMPLE_RATE)) * 1000;
         if (Number.isFinite(ms) && ms > 0) bufferedAudioMs += ms;
+
+        // Debug counters (log occasionally).
+        (globalThis as any).__audioChunks = ((globalThis as any).__audioChunks ?? 0) + 1;
+        if (((globalThis as any).__audioChunks as number) % 100 === 0) {
+          log({ stage: 'audio_chunk', chunks: (globalThis as any).__audioChunks, bufferedAudioMs: Number(bufferedAudioMs.toFixed(0)), lastChunkB64Len: b64.length });
+        }
 
         return;
       }
@@ -327,6 +332,7 @@ wss.on('connection', (clientWs) => {
           );
         }
 
+        log({ stage: 'commit_sent', bufferedAudioMs: Number(bufferedAudioMs.toFixed(0)) });
         openaiWs.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
         bufferedAudioMs = 0;
 
