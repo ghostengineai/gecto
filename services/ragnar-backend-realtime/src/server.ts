@@ -110,6 +110,9 @@ wss.on('connection', (clientWs) => {
   let lastTranscript = '';
   let speakingAbort: AbortController | null = null;
   let bufferedAudioMs = 0;
+  const pendingAudio: string[] = [];
+  let pendingCommit: { instructions?: string } | null = null;
+  const pendingText: string[] = [];
 
   function log(obj: Record<string, unknown>) {
     console.log(JSON.stringify({ traceId, ...obj }));
@@ -133,6 +136,31 @@ wss.on('connection', (clientWs) => {
       }
     };
     openaiWs.send(JSON.stringify(sessionUpdate));
+
+    // Flush any audio/text that arrived before OpenAI WS was ready.
+    for (const b64 of pendingAudio.splice(0, pendingAudio.length)) {
+      openaiWs.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: b64 }));
+      const bytes = Math.floor((b64.length * 3) / 4);
+      const ms = (bytes / (2 * INPUT_SAMPLE_RATE)) * 1000;
+      if (Number.isFinite(ms) && ms > 0) bufferedAudioMs += ms;
+    }
+
+    for (const text of pendingText.splice(0, pendingText.length)) {
+      // Treat early text as user input.
+      openaiWs.send(
+        JSON.stringify({
+          type: 'conversation.item.create',
+          item: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] },
+        })
+      );
+    }
+
+    if (pendingCommit) {
+      const instr = pendingCommit.instructions;
+      pendingCommit = null;
+      // Trigger commit path by faking a commit message into the handler.
+      clientWs.emit('message', Buffer.from(JSON.stringify({ type: 'commit', instructions: instr })));
+    }
 
     safeSend(clientWs, { type: 'ready' });
   });
@@ -238,7 +266,14 @@ wss.on('connection', (clientWs) => {
     }
 
     if (openaiWs.readyState !== WebSocket.OPEN) {
-      safeSend(clientWs, { type: 'error', error: 'Realtime session not ready yet' });
+      // Buffer until OpenAI WS is ready. This avoids dropping early audio from Twilio.
+      if (msg.type === 'audio_chunk') {
+        if (msg.audio) pendingAudio.push(msg.audio);
+      } else if (msg.type === 'commit') {
+        pendingCommit = { instructions: msg.instructions };
+      } else if (msg.type === 'text') {
+        if (msg.text) pendingText.push(msg.text);
+      }
       return;
     }
 
