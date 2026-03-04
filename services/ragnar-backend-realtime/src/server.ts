@@ -113,6 +113,7 @@ wss.on('connection', (clientWs) => {
   const pendingAudio: string[] = [];
   let pendingCommit: { instructions?: string } | null = null;
   const pendingText: string[] = [];
+  const pcmChunks: Buffer[] = [];
 
   function log(obj: Record<string, unknown>) {
     console.log(JSON.stringify({ traceId, ...obj }));
@@ -283,21 +284,20 @@ wss.on('connection', (clientWs) => {
         return;
 
       case 'audio_chunk': {
-        // Append raw audio to OpenAI input buffer.
         const b64 = msg.audio || '';
-        openaiWs.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: b64 }));
+        if (b64) {
+          const buf = Buffer.from(b64, 'base64');
+          pcmChunks.push(buf);
 
-        // Track how much audio we have so commit doesn't fail on short buffers.
-        const bytes = Math.floor((b64.length * 3) / 4);
-        const ms = (bytes / (2 * INPUT_SAMPLE_RATE)) * 1000;
-        if (Number.isFinite(ms) && ms > 0) bufferedAudioMs += ms;
+          const ms = (buf.length / (2 * INPUT_SAMPLE_RATE)) * 1000;
+          if (Number.isFinite(ms) && ms > 0) bufferedAudioMs += ms;
 
-        // Debug counters (log occasionally).
-        (globalThis as any).__audioChunks = ((globalThis as any).__audioChunks ?? 0) + 1;
-        if (((globalThis as any).__audioChunks as number) % 100 === 0) {
-          log({ stage: 'audio_chunk', chunks: (globalThis as any).__audioChunks, bufferedAudioMs: Number(bufferedAudioMs.toFixed(0)), lastChunkB64Len: b64.length });
+          // Debug counters (log occasionally).
+          (globalThis as any).__audioChunks = ((globalThis as any).__audioChunks ?? 0) + 1;
+          if (((globalThis as any).__audioChunks as number) % 100 === 0) {
+            log({ stage: 'audio_chunk', chunks: (globalThis as any).__audioChunks, bufferedAudioMs: Number(bufferedAudioMs.toFixed(0)), lastChunkB64Len: b64.length });
+          }
         }
-
         return;
       }
 
@@ -333,26 +333,25 @@ wss.on('connection', (clientWs) => {
         }
 
         log({ stage: 'commit_sent', bufferedAudioMs: Number(bufferedAudioMs.toFixed(0)) });
-        openaiWs.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
+
+        // Transcribe buffered PCM via Whisper HTTP (reliable).
+        const pcm = Buffer.concat(pcmChunks.splice(0, pcmChunks.length));
         bufferedAudioMs = 0;
 
-        // Wait a short moment for transcription to arrive; then run the agent.
-        // We don't have a reliable server-side hook for "transcription done" across all models,
-        // so this is best-effort.
-        setTimeout(async () => {
-          const text = (lastTranscript || '').trim();
-          if (!text) {
-            safeSend(clientWs, { type: 'error', error: 'No transcript captured' });
-            return;
-          }
-
+        (async () => {
           try {
-            const agentText = await runOpenClawAgentStreaming(text, (delta) => {
+            const transcript = (await transcribePcm16WithWhisper(pcm, INPUT_SAMPLE_RATE)).trim();
+            if (!transcript) {
+              safeSend(clientWs, { type: 'error', error: 'No transcript captured' });
+              return;
+            }
+            safeSend(clientWs, { type: 'transcript', text: transcript });
+
+            const agentText = await runOpenClawAgentStreaming(transcript, (delta) => {
               safeSend(clientWs, { type: 'text_delta', text: delta });
             });
             safeSend(clientWs, { type: 'text_completed', text: agentText });
 
-            // Speak the agent response via OpenAI TTS HTTP (reliable) and stream PCM16 chunks.
             speakingAbort = new AbortController();
             await speakViaHttpTts(agentText, OUTPUT_SAMPLE_RATE, speakingAbort.signal, (b64) => {
               safeSend(clientWs, { type: 'audio_delta', audio: b64 });
@@ -361,7 +360,7 @@ wss.on('connection', (clientWs) => {
           } catch (e) {
             safeSend(clientWs, { type: 'error', error: e instanceof Error ? e.message : String(e) });
           }
-        }, 350);
+        })();
 
         return;
       }
@@ -520,6 +519,62 @@ async function runOpenClawAgentStreaming(inputText: string, onDelta: (delta: str
   }
 
   return full;
+}
+
+function wavFromPcm16(pcm: Buffer, sampleRate: number): Buffer {
+  const numChannels = 1;
+  const bitsPerSample = 16;
+  const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+  const blockAlign = numChannels * (bitsPerSample / 8);
+  const dataSize = pcm.length;
+  const chunkSize = 36 + dataSize;
+
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0);
+  header.writeUInt32LE(chunkSize, 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16); // PCM fmt chunk size
+  header.writeUInt16LE(1, 20); // PCM format
+  header.writeUInt16LE(numChannels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write('data', 36);
+  header.writeUInt32LE(dataSize, 40);
+  return Buffer.concat([header, pcm]);
+}
+
+async function transcribePcm16WithWhisper(pcm: Buffer, sampleRate: number): Promise<string> {
+  if (!OPENAI_API_KEY) throw new Error('OPENAI_API_KEY is missing');
+  if (!pcm.length) return '';
+
+  // Guard: Whisper needs some audio.
+  const ms = (pcm.length / (2 * sampleRate)) * 1000;
+  if (ms < 120) return '';
+
+  const wav = wavFromPcm16(pcm, sampleRate);
+
+  const model = env('WHISPER_MODEL', 'whisper-1')!;
+
+  const form = new FormData();
+  form.set('model', model);
+  form.set('file', new Blob([new Uint8Array(wav)], { type: 'audio/wav' }), 'audio.wav');
+
+  const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+    body: form,
+  } as any);
+
+  if (!res.ok) {
+    const err = await res.text().catch(() => '');
+    throw new Error(`Whisper failed (${res.status}): ${err.slice(0, 300)}`);
+  }
+
+  const json: any = await res.json();
+  return String(json.text ?? '').trim();
 }
 
 async function speakViaHttpTts(
