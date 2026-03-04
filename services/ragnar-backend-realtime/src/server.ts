@@ -109,6 +109,7 @@ wss.on('connection', (clientWs) => {
   let responseId: string | undefined;
   let lastTranscript = '';
   let speakingAbort: AbortController | null = null;
+  let bufferedAudioMs = 0;
 
   function log(obj: Record<string, unknown>) {
     console.log(JSON.stringify({ traceId, ...obj }));
@@ -124,8 +125,11 @@ wss.on('connection', (clientWs) => {
       session: {
         instructions: REALTIME_INSTRUCTIONS,
         voice: REALTIME_VOICE,
-        input_audio_format: { type: 'pcm16', sample_rate: INPUT_SAMPLE_RATE },
-        output_audio_format: { type: 'pcm16', sample_rate: OUTPUT_SAMPLE_RATE }
+        // Realtime expects string format names (sample rate is implied/handled by the model).
+        input_audio_format: 'pcm16',
+        output_audio_format: 'pcm16',
+        // Ask for input transcription when supported.
+        input_audio_transcription: { model: env('ASR_MODEL', 'whisper-1') },
       }
     };
     openaiWs.send(JSON.stringify(sessionUpdate));
@@ -246,6 +250,14 @@ wss.on('connection', (clientWs) => {
       case 'audio_chunk': {
         // Append raw audio to OpenAI input buffer.
         openaiWs.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: msg.audio }));
+
+        // Track how much audio we have so commit doesn't fail on short buffers.
+        // base64 → bytes (approx exact for valid b64)
+        const b64 = msg.audio || '';
+        const bytes = Math.floor((b64.length * 3) / 4);
+        const ms = (bytes / (2 * INPUT_SAMPLE_RATE)) * 1000;
+        if (Number.isFinite(ms) && ms > 0) bufferedAudioMs += ms;
+
         return;
       }
 
@@ -255,6 +267,12 @@ wss.on('connection', (clientWs) => {
         accumulatedText = '';
         responseId = undefined;
         lastTranscript = '';
+
+        if (bufferedAudioMs < 100) {
+          safeSend(clientWs, { type: 'error', error: `Audio buffer too small (${bufferedAudioMs.toFixed(0)}ms). Speak a bit longer.` });
+          bufferedAudioMs = 0;
+          return;
+        }
 
         // Cancel any in-flight speech (barge-in).
         if (speakingAbort) {
@@ -275,6 +293,7 @@ wss.on('connection', (clientWs) => {
         }
 
         openaiWs.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
+        bufferedAudioMs = 0;
 
         // Wait a short moment for transcription to arrive; then run the agent.
         // We don't have a reliable server-side hook for "transcription done" across all models,
