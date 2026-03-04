@@ -14,6 +14,7 @@ import {
 type CallStatus = 'idle' | 'connecting' | 'connected' | 'error';
 
 type RelayClientMessage =
+  | { type: 'start'; traceId?: string; agent?: string; metadata?: Record<string, string> }
   | { type: 'audio_chunk'; audio: string }
   | { type: 'commit'; instructions?: string }
   | { type: 'text'; text: string }
@@ -30,6 +31,8 @@ type RelayServerEvent =
 
 const DEFAULT_RELAY_URL = process.env.NEXT_PUBLIC_VOICE_RELAY_URL ?? 'ws://localhost:5050/relay';
 const RELAY_TOKEN = process.env.NEXT_PUBLIC_VOICE_RELAY_TOKEN;
+const DEFAULT_AGENT_NAME = process.env.NEXT_PUBLIC_AGENT_NAME ?? 'openclaw';
+const DEFAULT_TURN_INSTRUCTIONS = process.env.NEXT_PUBLIC_AGENT_INSTRUCTIONS ?? '';
 const RELAY_INPUT_SAMPLE_RATE = Number(process.env.NEXT_PUBLIC_RELAY_INPUT_SAMPLE_RATE ?? 16000);
 const RELAY_OUTPUT_SAMPLE_RATE = Number(process.env.NEXT_PUBLIC_RELAY_OUTPUT_SAMPLE_RATE ?? 24000);
 const RELAY_CHUNK_MS = Number(process.env.NEXT_PUBLIC_RELAY_CHUNK_MS ?? 20);
@@ -42,6 +45,11 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [userTranscript, setUserTranscript] = useState<string>('');
   const [assistantText, setAssistantText] = useState<string>('');
+  const [relayUrl, setRelayUrl] = useState<string>(DEFAULT_RELAY_URL);
+  const [relayToken, setRelayToken] = useState<string>(RELAY_TOKEN ?? '');
+  const [agentName, setAgentName] = useState<string>(DEFAULT_AGENT_NAME);
+  const [turnInstructions, setTurnInstructions] = useState<string>(DEFAULT_TURN_INSTRUCTIONS);
+  const [textInput, setTextInput] = useState<string>('');
 
   const socketRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -67,10 +75,10 @@ export default function Home() {
     [],
   );
 
-  const buildRelayUrl = useCallback(() => {
-    const base = (DEFAULT_RELAY_URL ?? '').trim();
+  const buildRelayUrl = useCallback((rawUrl: string, rawToken?: string) => {
+    const base = rawUrl.trim();
     if (!base) {
-      throw new Error('NEXT_PUBLIC_VOICE_RELAY_URL is not configured');
+      throw new Error('Relay URL is required');
     }
     let resolved: URL;
     if (base.startsWith('ws://') || base.startsWith('wss://')) {
@@ -80,8 +88,9 @@ export default function Home() {
       const wsOrigin = origin.replace(/^http/, 'ws');
       resolved = new URL(base, wsOrigin);
     }
-    if (RELAY_TOKEN) {
-      resolved.searchParams.set('token', RELAY_TOKEN);
+    const token = rawToken?.trim();
+    if (token) {
+      resolved.searchParams.set('token', token);
     }
     return resolved.toString();
   }, []);
@@ -196,7 +205,8 @@ export default function Home() {
       hasPendingSpeechRef.current = false;
       silenceMsRef.current = 0;
       speechSamplesRef.current = 0;
-      dispatchToRelay({ type: 'commit' });
+      const instructions = turnInstructions.trim();
+      dispatchToRelay({ type: 'commit', instructions: instructions || undefined });
     }
   };
 
@@ -305,9 +315,15 @@ export default function Home() {
       processor.connect(audioContext.destination);
       streamingActiveRef.current = true;
 
-      const url = buildRelayUrl();
+      const url = buildRelayUrl(relayUrl, relayToken);
       const ws = new WebSocket(url);
       socketRef.current = ws;
+
+      dispatchToRelay({
+        type: 'start',
+        agent: agentName.trim() || 'openclaw',
+        metadata: turnInstructions.trim() ? { instructions: turnInstructions.trim() } : undefined,
+      });
 
       ws.onmessage = (event) => {
         try {
@@ -336,6 +352,14 @@ export default function Home() {
     }
   };
 
+  const sendTextTurn = () => {
+    if (status !== 'connected') return;
+    const text = textInput.trim();
+    if (!text) return;
+    dispatchToRelay({ type: 'text', text });
+    setTextInput('');
+  };
+
   const disconnect = () => {
     if (status === 'idle') return;
     const socket = socketRef.current;
@@ -352,11 +376,54 @@ export default function Home() {
       <div className="mx-auto flex min-h-screen max-w-3xl flex-col items-center justify-center gap-6 px-6">
         <div className="w-full rounded-3xl border border-white/10 bg-white/5 p-8 shadow-2xl">
           <p className="text-sm uppercase tracking-[0.3em] text-blue-300">Voice Bridge</p>
-          <h1 className="mt-2 text-4xl font-semibold">Live conversation with Ragnar</h1>
+          <h1 className="mt-2 text-4xl font-semibold">Live conversation with your OpenClaw agent</h1>
           <p className="mt-3 text-sm text-white/70">
-            Connect once, speak naturally, and Ragnar will respond as the relay streams audio in both
-            directions. Silence detection automatically triggers replies when you pause.
+            Connect once, speak naturally, and your agent will respond as the relay streams audio in
+            both directions. Silence detection automatically triggers replies when you pause.
           </p>
+
+          <div className="mt-6 grid gap-3 rounded-2xl border border-white/10 bg-black/30 p-5 sm:grid-cols-2">
+            <label className="text-sm text-white/70">
+              Relay URL
+              <input
+                value={relayUrl}
+                onChange={(event) => setRelayUrl(event.target.value)}
+                disabled={status !== 'idle' && status !== 'error'}
+                placeholder="ws://localhost:5050/relay"
+                className="mt-2 w-full rounded-lg border border-white/20 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-blue-400 disabled:opacity-60"
+              />
+            </label>
+            <label className="text-sm text-white/70">
+              Relay token (optional)
+              <input
+                value={relayToken}
+                onChange={(event) => setRelayToken(event.target.value)}
+                disabled={status !== 'idle' && status !== 'error'}
+                placeholder="token"
+                className="mt-2 w-full rounded-lg border border-white/20 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-blue-400 disabled:opacity-60"
+              />
+            </label>
+            <label className="text-sm text-white/70">
+              Agent name
+              <input
+                value={agentName}
+                onChange={(event) => setAgentName(event.target.value)}
+                disabled={status !== 'idle' && status !== 'error'}
+                placeholder="openclaw"
+                className="mt-2 w-full rounded-lg border border-white/20 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-blue-400 disabled:opacity-60"
+              />
+            </label>
+            <label className="text-sm text-white/70">
+              Turn instructions (optional)
+              <input
+                value={turnInstructions}
+                onChange={(event) => setTurnInstructions(event.target.value)}
+                disabled={status !== 'idle' && status !== 'error'}
+                placeholder="Speak briefly and clearly."
+                className="mt-2 w-full rounded-lg border border-white/20 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-blue-400 disabled:opacity-60"
+              />
+            </label>
+          </div>
 
           <div className="mt-6 rounded-2xl border border-white/10 bg-black/40 p-5">
             <p className="text-sm text-white/60">Status</p>
@@ -394,10 +461,36 @@ export default function Home() {
               </p>
             </div>
             <div>
-              <p className="text-xs uppercase tracking-[0.2em] text-white/60">Ragnar</p>
+              <p className="text-xs uppercase tracking-[0.2em] text-white/60">Assistant</p>
               <p className="mt-2 min-h-[4rem] whitespace-pre-wrap text-sm text-white">
                 {assistantText || 'Listening…'}
               </p>
+            </div>
+          </div>
+
+          <div className="mt-6 rounded-2xl border border-white/10 bg-black/30 p-5">
+            <p className="text-xs uppercase tracking-[0.2em] text-white/60">Send text turn</p>
+            <div className="mt-3 flex flex-col gap-3 sm:flex-row">
+              <input
+                value={textInput}
+                onChange={(event) => setTextInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    sendTextTurn();
+                  }
+                }}
+                disabled={status !== 'connected'}
+                placeholder="Type a message to your agent"
+                className="w-full rounded-lg border border-white/20 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-blue-400 disabled:opacity-60"
+              />
+              <button
+                onClick={sendTextTurn}
+                disabled={status !== 'connected' || !textInput.trim()}
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40"
+              >
+                Send
+              </button>
             </div>
           </div>
         </div>
