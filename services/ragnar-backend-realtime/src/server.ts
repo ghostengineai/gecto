@@ -13,11 +13,11 @@ type ClientMsg =
 
 type RelayEvent =
   | { type: 'ready' }
-  | { type: 'transcript'; text: string }
-  | { type: 'text_delta'; text: string }
-  | { type: 'text_completed'; text: string }
-  | { type: 'audio_delta'; audio: string }
-  | { type: 'response_completed'; responseId?: string }
+  | { type: 'transcript'; text: string; turnId?: string }
+  | { type: 'text_delta'; text: string; turnId?: string }
+  | { type: 'text_completed'; text: string; turnId?: string }
+  | { type: 'audio_delta'; audio: string; turnId?: string }
+  | { type: 'response_completed'; responseId?: string; turnId?: string }
   | { type: 'error'; error: string };
 
 function env(name: string, fallback?: string): string | undefined {
@@ -44,6 +44,9 @@ const REALTIME_INSTRUCTIONS = env(
   )
 )!;
 const TRANSCRIPTION_LANGUAGE = env('TRANSCRIPTION_LANGUAGE', 'en')!;
+const TURN_TIMEOUT_MS = Number(env('TURN_TIMEOUT_MS', '12000'));
+const FALLBACK_REPLY =
+  env('FALLBACK_REPLY', "I’m still here. I had trouble processing that. Please repeat your request in one short sentence.")!;
 
 // OpenClaw Gateway (Ragnar-with-tools). We call its HTTP OpenResponses endpoint.
 // Render will typically set OPENCLAW_GATEWAY_URL as wss://host:port; we derive http://host:port.
@@ -131,6 +134,30 @@ function takeSpeakableChunk(text: string, force = false): { chunk: string | null
     return { chunk: trimmed, rest: '' };
   }
   return { chunk: null, rest: trimmed };
+}
+
+function normalizeForSpeech(rawText: string): string {
+  const collapsed = rawText.replace(/\s+/g, ' ').trim();
+  if (!collapsed) return '';
+  const sentences = collapsed
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const deduped: string[] = [];
+  for (const sentence of sentences) {
+    const norm = sentence.toLowerCase().replace(/[^a-z0-9 ]+/g, '').replace(/\s+/g, ' ').trim();
+    if (!norm) continue;
+    const duplicate = deduped.some((existing) => {
+      const e = existing.toLowerCase().replace(/[^a-z0-9 ]+/g, '').replace(/\s+/g, ' ').trim();
+      return e === norm || e.includes(norm) || norm.includes(e);
+    });
+    if (!duplicate) deduped.push(sentence);
+  }
+
+  const merged = deduped.join(' ').trim();
+  if (merged.length <= 900) return merged;
+  return merged.slice(0, 900).trim();
 }
 
 wss.on('connection', (clientWs) => {
@@ -323,15 +350,24 @@ wss.on('connection', (clientWs) => {
     if (!text) return;
 
     turnInFlight = true;
-    const turnId = ++activeTurnId;
+    const turnIndex = ++activeTurnId;
+    const turnId = `turn_${turnIndex}_${Date.now()}`;
     const generationCtl = new AbortController();
     const speakingCtl = new AbortController();
     generationAbort = generationCtl;
     speakingAbort = speakingCtl;
+    const timeoutHandle = setTimeout(() => {
+      if (activeTurnId === turnIndex && !generationCtl.signal.aborted) {
+        generationCtl.abort();
+        speakingCtl.abort();
+        log({ stage: 'turn_timeout', turnId, timeoutMs: TURN_TIMEOUT_MS });
+      }
+    }, Math.max(3000, TURN_TIMEOUT_MS));
 
     let ttsRemainder = '';
     const ttsQueue: string[] = [];
     let ttsWorker: Promise<void> | null = null;
+    let lastDeltaNorm = '';
 
     const flushTtsQueue = () => {
       if (!ttsWorker) {
@@ -340,7 +376,7 @@ wss.on('connection', (clientWs) => {
             const next = ttsQueue.shift();
             if (!next) continue;
             await speakViaHttpTts(next, OUTPUT_SAMPLE_RATE, speakingCtl.signal, (b64) => {
-              safeSend(clientWs, { type: 'audio_delta', audio: b64 });
+              safeSend(clientWs, { type: 'audio_delta', audio: b64, turnId });
             });
           }
           ttsWorker = null;
@@ -367,7 +403,12 @@ wss.on('connection', (clientWs) => {
         const finalText = await runOpenClawAgentStreaming(
           text,
           (delta) => {
-            safeSend(clientWs, { type: 'text_delta', text: delta });
+            const norm = delta.replace(/\s+/g, ' ').trim().toLowerCase();
+            if (norm && norm === lastDeltaNorm) {
+              return;
+            }
+            if (norm) lastDeltaNorm = norm;
+            safeSend(clientWs, { type: 'text_delta', text: delta, turnId });
             enqueueSpeakable(delta, false);
           },
           {
@@ -381,20 +422,34 @@ wss.on('connection', (clientWs) => {
           ttsQueue.push(ttsRemainder.trim());
           ttsRemainder = '';
         }
+        const cleanedText = normalizeForSpeech(finalText);
+        if (!cleanedText) {
+          ttsQueue.push(FALLBACK_REPLY);
+        }
         await flushTtsQueue();
         if (ttsWorker) {
           await ttsWorker;
         }
-        safeSend(clientWs, { type: 'text_completed', text: finalText });
-        safeSend(clientWs, { type: 'response_completed', responseId: `openclaw_${Date.now()}` });
+        safeSend(clientWs, { type: 'text_completed', text: cleanedText || FALLBACK_REPLY, turnId });
+        safeSend(clientWs, { type: 'response_completed', responseId: `openclaw_${Date.now()}`, turnId });
       } catch (e) {
         if (!isAbortError(e)) {
           safeSend(clientWs, { type: 'error', error: e instanceof Error ? e.message : String(e) });
+          try {
+            await speakViaHttpTts(FALLBACK_REPLY, OUTPUT_SAMPLE_RATE, speakingCtl.signal, (b64) => {
+              safeSend(clientWs, { type: 'audio_delta', audio: b64, turnId });
+            });
+            safeSend(clientWs, { type: 'text_completed', text: FALLBACK_REPLY, turnId });
+            safeSend(clientWs, { type: 'response_completed', responseId: `fallback_${Date.now()}`, turnId });
+          } catch {
+            // ignore secondary fallback errors
+          }
         } else {
           log({ stage: 'turn_aborted' });
         }
       } finally {
-        if (activeTurnId === turnId) {
+        clearTimeout(timeoutHandle);
+        if (activeTurnId === turnIndex) {
           turnInFlight = false;
           generationAbort = null;
           speakingAbort = null;
@@ -488,6 +543,12 @@ wss.on('connection', (clientWs) => {
             const transcript = (await transcribePcm16WithWhisper(pcm, INPUT_SAMPLE_RATE)).trim();
             if (!transcript) {
               safeSend(clientWs, { type: 'error', error: 'No transcript captured' });
+              const fallbackCtl = new AbortController();
+              await speakViaHttpTts(FALLBACK_REPLY, OUTPUT_SAMPLE_RATE, fallbackCtl.signal, (b64) => {
+                safeSend(clientWs, { type: 'audio_delta', audio: b64 });
+              });
+              safeSend(clientWs, { type: 'text_completed', text: FALLBACK_REPLY });
+              safeSend(clientWs, { type: 'response_completed', responseId: `fallback_${Date.now()}` });
               return;
             }
             safeSend(clientWs, { type: 'transcript', text: transcript });
