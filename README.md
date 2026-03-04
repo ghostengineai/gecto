@@ -1,6 +1,6 @@
 # Voice Bridge App
 
-Next.js client for the Ragnar voice bridge. It now streams audio through the local `services/voice-relay-server` via WebSockets, letting browsers participate in the same relay used by the phone + PSTN bridges.
+Next.js client for a voice bridge that can stream to Ragnar or your own OpenClaw-style agent through `services/voice-relay-server`.
 
 ## Getting Started
 
@@ -26,6 +26,8 @@ Set `NEXT_PUBLIC_VOICE_RELAY_URL` (or rely on the default `ws://localhost:5050/r
 | --- | --- | --- |
 | `NEXT_PUBLIC_VOICE_RELAY_URL` | client | WebSocket URL for `voice-relay-server` (default `ws://localhost:5050/relay`) |
 | `NEXT_PUBLIC_VOICE_RELAY_TOKEN` | client (optional) | Token appended as `?token=...` for relays that require auth |
+| `NEXT_PUBLIC_AGENT_NAME` | client (optional) | Agent name sent in the initial `{type:"start"}` handshake (default `openclaw`) |
+| `NEXT_PUBLIC_AGENT_INSTRUCTIONS` | client (optional) | Optional per-turn instructions attached to `commit` messages |
 | `NEXT_PUBLIC_RELAY_INPUT_SAMPLE_RATE` | client (optional) | Sample rate sent to relay (default `16000`) |
 | `NEXT_PUBLIC_RELAY_OUTPUT_SAMPLE_RATE` | client (optional) | Sample rate expected from relay audio (default `24000`) |
 | `NEXT_PUBLIC_RELAY_CHUNK_MS` | client (optional) | Size of PCM chunks forwarded to relay (default `20` ms) |
@@ -39,9 +41,9 @@ If the BASIC auth vars are unset, the app is public; set them before deploying s
 
 ## Voice Relay Workflow
 
-1. **Browser ↔ relay WebSocket**: `src/app/page.tsx` opens `NEXT_PUBLIC_VOICE_RELAY_URL`, queues microphone PCM16 frames (`audio_chunk`), and listens for Ragnar transcripts + audio.
+1. **Browser ↔ relay WebSocket**: `src/app/page.tsx` opens `NEXT_PUBLIC_VOICE_RELAY_URL`, sends a `{type:"start"}` handshake, queues microphone PCM16 frames (`audio_chunk`), and listens for transcript + audio events.
 2. **PCM capture**: the mic stream runs through the Web Audio API. Samples are converted to `Int16`, resampled to `NEXT_PUBLIC_RELAY_INPUT_SAMPLE_RATE`, batched into `NEXT_PUBLIC_RELAY_CHUNK_MS`, and base64-encoded before hitting `/relay`.
-3. **Auto commit via VAD**: a lightweight RMS-based detector mirrors the phone bridge. After `NEXT_PUBLIC_COMMIT_SILENCE_MS` of silence, we send `{ type: "commit" }` so Ragnar responds naturally without button presses.
+3. **Auto commit via VAD**: a lightweight RMS-based detector mirrors the phone bridge. After `NEXT_PUBLIC_COMMIT_SILENCE_MS` of silence, we send `{ type: "commit", instructions? }` so your agent responds naturally without button presses.
 4. **Playback**: incoming `audio_delta` payloads are decoded back into PCM, queued inside an `AudioContext`, and played immediately. `text_delta`/`transcript` events drive the on-screen captions.
 5. **Hang up**: clicking **Hang Up** sends `{ type: "end" }` to the relay and tears down the audio graph/WebSocket.
 

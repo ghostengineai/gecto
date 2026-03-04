@@ -7,7 +7,11 @@ import { log, newTraceId } from "./util/log";
 dotenv.config();
 
 const PORT = Number(process.env.VOICE_RELAY_PORT ?? process.env.PORT ?? 5050);
-const BACKEND_URL = process.env.RAGNAR_BACKEND_URL ?? "ws://localhost:5051/relay";
+const BACKEND_URL =
+  process.env.OPENCLAW_AGENT_URL ??
+  process.env.AGENT_BACKEND_URL ??
+  process.env.RAGNAR_BACKEND_URL ??
+  "ws://localhost:5051/relay";
 
 const app = express();
 app.get("/healthz", (_, res) => {
@@ -111,7 +115,7 @@ wss.on("connection", (client: WebSocket) => {
       backendMsgCount,
       clientMsgCount,
     });
-    sendClientError("Ragnar backend connection closed");
+    sendClientError("Agent backend connection closed");
     if (client.readyState === WebSocket.OPEN) {
       client.close();
     }
@@ -125,7 +129,7 @@ wss.on("connection", (client: WebSocket) => {
       ms: Date.now() - startedAt,
       err: error.message,
     });
-    sendClientError("Unable to reach Ragnar backend");
+    sendClientError("Unable to reach agent backend");
     closeBoth();
   });
 

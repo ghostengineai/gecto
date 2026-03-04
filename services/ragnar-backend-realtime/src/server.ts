@@ -7,7 +7,7 @@ type ClientMsg =
   | { type: 'audio_chunk'; audio: string; traceId?: string }
   | { type: 'commit'; instructions?: string; traceId?: string }
   | { type: 'text'; text: string; traceId?: string }
-  | { type: 'start'; traceId?: string }
+  | { type: 'start'; traceId?: string; agent?: string; metadata?: Record<string, string> }
   | { type: 'end'; traceId?: string };
 
 type RelayEvent =
@@ -36,8 +36,12 @@ const OPENAI_REALTIME_URL = env(
 const REALTIME_VOICE = env('REALTIME_VOICE', env('TALK_VOICE_ID', 'alloy'))!;
 const REALTIME_INSTRUCTIONS = env(
   'REALTIME_INSTRUCTIONS',
-  env('RAGNAR_PROMPT', 'You are Ragnar. Be calm, efficient, and helpful. No emojis.')
+  env(
+    'RAGNAR_PROMPT',
+    'You are Ragnar. Respond in English unless the user explicitly asks for another language. Be calm, efficient, and helpful. No emojis.'
+  )
 )!;
+const TRANSCRIPTION_LANGUAGE = env('TRANSCRIPTION_LANGUAGE', 'en')!;
 
 // OpenClaw Gateway (Ragnar-with-tools). We call its HTTP OpenResponses endpoint.
 // Render will typically set OPENCLAW_GATEWAY_URL as wss://host:port; we derive http://host:port.
@@ -114,6 +118,7 @@ wss.on('connection', (clientWs) => {
   let pendingCommit: { instructions?: string } | null = null;
   const pendingText: string[] = [];
   const pcmChunks: Buffer[] = [];
+  let startInstructions: string | null = null;
 
   function log(obj: Record<string, unknown>) {
     console.log(JSON.stringify({ traceId, ...obj }));
@@ -133,7 +138,7 @@ wss.on('connection', (clientWs) => {
         input_audio_format: 'pcm16',
         output_audio_format: 'pcm16',
         // Ask for input transcription when supported.
-        input_audio_transcription: { model: env('ASR_MODEL', 'whisper-1') },
+        input_audio_transcription: { model: env('ASR_MODEL', 'whisper-1'), language: TRANSCRIPTION_LANGUAGE },
       }
     };
     openaiWs.send(JSON.stringify(sessionUpdate));
@@ -280,7 +285,7 @@ wss.on('connection', (clientWs) => {
 
     switch (msg.type) {
       case 'start':
-        // no-op for now
+        startInstructions = msg.metadata?.instructions?.trim() || null;
         return;
 
       case 'audio_chunk': {
@@ -347,9 +352,15 @@ wss.on('connection', (clientWs) => {
             }
             safeSend(clientWs, { type: 'transcript', text: transcript });
 
-            const agentText = await runOpenClawAgentStreaming(transcript, (delta) => {
-              safeSend(clientWs, { type: 'text_delta', text: delta });
-            });
+            const agentText = await runOpenClawAgentStreaming(
+              transcript,
+              (delta) => {
+                safeSend(clientWs, { type: 'text_delta', text: delta });
+              },
+              {
+                extraGuidance: msg.instructions?.trim() || startInstructions || undefined,
+              }
+            );
             safeSend(clientWs, { type: 'text_completed', text: agentText });
 
             speakingAbort = new AbortController();
@@ -380,9 +391,15 @@ wss.on('connection', (clientWs) => {
           const text = (msg.text || '').trim();
           if (!text) return;
           try {
-            const agentText = await runOpenClawAgentStreaming(text, (delta) => {
-              safeSend(clientWs, { type: 'text_delta', text: delta });
-            });
+            const agentText = await runOpenClawAgentStreaming(
+              text,
+              (delta) => {
+                safeSend(clientWs, { type: 'text_delta', text: delta });
+              },
+              {
+                extraGuidance: startInstructions || undefined,
+              }
+            );
             safeSend(clientWs, { type: 'text_completed', text: agentText });
             speakingAbort = new AbortController();
             await speakViaHttpTts(agentText, OUTPUT_SAMPLE_RATE, speakingAbort.signal, (b64) => {
@@ -423,7 +440,11 @@ wss.on('connection', (clientWs) => {
   });
 });
 
-async function runOpenClawAgentStreaming(inputText: string, onDelta: (delta: string) => void): Promise<string> {
+async function runOpenClawAgentStreaming(
+  inputText: string,
+  onDelta: (delta: string) => void,
+  options?: { extraGuidance?: string }
+): Promise<string> {
   const base = gatewayHttpBase();
   if (!base) throw new Error('OPENCLAW_GATEWAY_URL is not set');
   if (!OPENCLAW_GATEWAY_TOKEN) throw new Error('OPENCLAW_GATEWAY_TOKEN is not set');
@@ -436,17 +457,30 @@ async function runOpenClawAgentStreaming(inputText: string, onDelta: (delta: str
     model: `openclaw:${OPENCLAW_AGENT_ID}`,
     stream: true,
     // Some gateway builds ignore top-level `instructions`; include a system message too.
-    instructions: 'You are Ragnar (OpenClaw). Respond in English. Be calm, efficient, and helpful. No emojis.',
+    instructions:
+      'You are Ragnar (OpenClaw). Always respond in English unless the user explicitly asks for another language. Be calm, efficient, and helpful. No emojis.',
     input: [
       {
         type: 'message',
         role: 'system',
-        content: [{ type: 'input_text', text: 'Respond in English. No emojis.' }],
+        content: [
+          {
+            type: 'input_text',
+            text: 'Always respond in English unless the user explicitly asks for another language. No emojis.',
+          },
+        ],
       },
       {
         type: 'message',
         role: 'user',
-        content: [{ type: 'input_text', text: inputText }],
+        content: [
+          {
+            type: 'input_text',
+            text: options?.extraGuidance
+              ? `${inputText}\n\nSystem guidance: ${options.extraGuidance}`
+              : inputText,
+          },
+        ],
       },
     ],
   };
@@ -600,9 +634,10 @@ async function speakViaHttpTts(
       model: ttsModel,
       voice: REALTIME_VOICE,
       input: text,
-      format: 'pcm16',
-      // Some APIs use `response_format` instead of `format`; keep compatible by duplicating.
-      response_format: 'pcm16',
+      // /v1/audio/speech expects "pcm" (not "pcm16").
+      format: 'pcm',
+      // Keep compatibility for providers expecting `response_format`.
+      response_format: 'pcm',
       sample_rate: sampleRate,
     }),
     signal,
