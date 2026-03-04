@@ -292,9 +292,11 @@ wss.on('connection', (clientWs) => {
             });
             safeSend(clientWs, { type: 'text_completed', text: agentText });
 
-            // Speak the agent response via Realtime TTS (best-effort "speak exactly" mode).
+            // Speak the agent response via OpenAI TTS HTTP (reliable) and stream PCM16 chunks.
             speakingAbort = new AbortController();
-            await speakViaRealtime(openaiWs, agentText, speakingAbort.signal);
+            await speakViaHttpTts(agentText, OUTPUT_SAMPLE_RATE, speakingAbort.signal, (b64) => {
+              safeSend(clientWs, { type: 'audio_delta', audio: b64 });
+            });
             safeSend(clientWs, { type: 'response_completed', responseId: `openclaw_${Date.now()}` });
           } catch (e) {
             safeSend(clientWs, { type: 'error', error: e instanceof Error ? e.message : String(e) });
@@ -324,7 +326,9 @@ wss.on('connection', (clientWs) => {
             });
             safeSend(clientWs, { type: 'text_completed', text: agentText });
             speakingAbort = new AbortController();
-            await speakViaRealtime(openaiWs, agentText, speakingAbort.signal);
+            await speakViaHttpTts(agentText, OUTPUT_SAMPLE_RATE, speakingAbort.signal, (b64) => {
+              safeSend(clientWs, { type: 'audio_delta', audio: b64 });
+            });
             safeSend(clientWs, { type: 'response_completed', responseId: `openclaw_${Date.now()}` });
           } catch (e) {
             safeSend(clientWs, { type: 'error', error: e instanceof Error ? e.message : String(e) });
@@ -452,37 +456,56 @@ async function runOpenClawAgentStreaming(inputText: string, onDelta: (delta: str
   return full;
 }
 
-async function speakViaRealtime(openaiWs: WebSocket, text: string, signal: AbortSignal): Promise<void> {
+async function speakViaHttpTts(
+  text: string,
+  sampleRate: number,
+  signal: AbortSignal,
+  onAudioDeltaBase64: (b64Pcm16Chunk: string) => void
+): Promise<void> {
   if (signal.aborted) return;
-  const speakInstructions =
-    'You are a text-to-speech renderer. Speak EXACTLY the provided text, word-for-word. ' +
-    'Do not add commentary. Do not change wording. Do not answer questions. Only read it aloud.';
+  if (!OPENAI_API_KEY) throw new Error('OPENAI_API_KEY is missing');
 
-  // Best-effort Realtime schema: create an item and ask for audio modality.
-  // If schema differs, you'll still get an error event and we fall back to nothing.
-  const item = {
-    type: 'conversation.item.create',
-    item: {
-      type: 'message',
-      role: 'user',
-      content: [{ type: 'input_text', text: `READ THIS TEXT VERBATIM:\n${text}` }],
+  // Use OpenAI TTS HTTP because it is stable and returns raw PCM.
+  // Note: model/params may be adjusted if your account has different TTS model names.
+  const ttsModel = env('TTS_MODEL', 'gpt-4o-mini-tts')!;
+
+  const res = await fetch('https://api.openai.com/v1/audio/speech', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      'Content-Type': 'application/json',
     },
-  };
-  openaiWs.send(JSON.stringify(item));
+    body: JSON.stringify({
+      model: ttsModel,
+      voice: REALTIME_VOICE,
+      input: text,
+      format: 'pcm16',
+      // Some APIs use `response_format` instead of `format`; keep compatible by duplicating.
+      response_format: 'pcm16',
+      sample_rate: sampleRate,
+    }),
+    signal,
+  } as any);
 
-  openaiWs.send(
-    JSON.stringify({
-      type: 'response.create',
-      response: {
-        modalities: ['audio'],
-        instructions: speakInstructions,
-        temperature: 0,
-      },
-    })
-  );
+  if (!res.ok) {
+    const err = await res.text().catch(() => '');
+    throw new Error(`TTS failed (${res.status}): ${err.slice(0, 300)}`);
+  }
 
-  // We don't await completion here with a dedicated event; audio deltas will stream
-  // through the existing message handler and be forwarded to the caller.
+  const buf = Buffer.from(await res.arrayBuffer());
+
+  // Stream as 20ms PCM16 mono frames.
+  const bytesPerSample = 2;
+  const bytesPerSecond = sampleRate * bytesPerSample;
+  const frameBytes = Math.max(1, Math.floor(bytesPerSecond * 0.02));
+
+  for (let off = 0; off < buf.length; off += frameBytes) {
+    if (signal.aborted) return;
+    const chunk = buf.subarray(off, Math.min(buf.length, off + frameBytes));
+    onAudioDeltaBase64(chunk.toString('base64'));
+    // Small pacing to avoid flooding downstream.
+    await new Promise((r) => setTimeout(r, 10));
+  }
 }
 
 server.listen(PORT, () => {
