@@ -436,10 +436,14 @@ async function runOpenClawAgentStreaming(inputText: string, onDelta: (delta: str
   const body = {
     model: `openclaw:${OPENCLAW_AGENT_ID}`,
     stream: true,
-    // Hard constraint so the voice experience doesn't drift languages.
+    // Some gateway builds ignore top-level `instructions`; include a system message too.
     instructions: 'You are Ragnar (OpenClaw). Respond in English. Be calm, efficient, and helpful. No emojis.',
-    // Use `user` to get a stable session per caller if you have a caller id.
     input: [
+      {
+        type: 'message',
+        role: 'system',
+        content: [{ type: 'input_text', text: 'Respond in English. No emojis.' }],
+      },
       {
         type: 'message',
         role: 'user',
