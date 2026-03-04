@@ -13,7 +13,7 @@ const PORT = Number(process.env.PORT ?? 5060);
 const RELAY_URL = process.env.VOICE_RELAY_URL ?? "ws://localhost:5050/relay";
 const RELAY_INPUT_RATE = Number(process.env.RELAY_INPUT_SAMPLE_RATE ?? 16000);
 const RELAY_OUTPUT_RATE = Number(process.env.RELAY_OUTPUT_SAMPLE_RATE ?? 24000);
-const COMMIT_SILENCE_MS = Number(process.env.COMMIT_SILENCE_MS ?? 900);
+const COMMIT_SILENCE_MS = Number(process.env.COMMIT_SILENCE_MS ?? 450);
 const VAD_THRESHOLD = Number(process.env.VAD_THRESHOLD ?? 0.012);
 const MAX_UTTERANCE_MS = Number(process.env.MAX_UTTERANCE_MS ?? 2500);
 const BARGE_IN = (() => {

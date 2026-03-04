@@ -495,7 +495,7 @@ export class PhoneBridgeManager {
   }
 
   private interruptRelay(session: BridgeSession) {
-    this.dispatchToRelay(session, JSON.stringify({ type: "end", traceId: session.trace.traceId }));
+    this.dispatchToRelay(session, JSON.stringify({ type: "interrupt", traceId: session.trace.traceId }));
   }
 
   private dispatchToRelay(session: BridgeSession, payload: string) {

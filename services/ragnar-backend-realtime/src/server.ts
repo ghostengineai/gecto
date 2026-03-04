@@ -8,6 +8,7 @@ type ClientMsg =
   | { type: 'commit'; instructions?: string; traceId?: string }
   | { type: 'text'; text: string; traceId?: string }
   | { type: 'start'; traceId?: string; agent?: string; metadata?: Record<string, string> }
+  | { type: 'interrupt'; traceId?: string }
   | { type: 'end'; traceId?: string };
 
 type RelayEvent =
@@ -34,6 +35,7 @@ const OPENAI_REALTIME_URL = env(
 )!;
 
 const REALTIME_VOICE = env('REALTIME_VOICE', env('TALK_VOICE_ID', 'alloy'))!;
+const TTS_VOICE = env('TTS_VOICE', REALTIME_VOICE)!;
 const REALTIME_INSTRUCTIONS = env(
   'REALTIME_INSTRUCTIONS',
   env(
@@ -98,6 +100,39 @@ function nowMs() {
   return Date.now();
 }
 
+function isAbortError(err: unknown): boolean {
+  if (!err) return false;
+  if (typeof err === 'object' && err !== null && 'name' in err) {
+    return String((err as { name?: unknown }).name) === 'AbortError';
+  }
+  if (err instanceof Error) {
+    return err.name === 'AbortError' || /aborted|abort/i.test(err.message);
+  }
+  return false;
+}
+
+function takeSpeakableChunk(text: string, force = false): { chunk: string | null; rest: string } {
+  const trimmed = text.trimStart();
+  if (!trimmed) return { chunk: null, rest: '' };
+  const maxChunk = 220;
+  const punctuation = /[.!?]\s|[,;:]\s|\n/;
+  const punctMatch = punctuation.exec(trimmed);
+  if (punctMatch && punctMatch.index >= 36) {
+    const end = punctMatch.index + punctMatch[0].length;
+    return { chunk: trimmed.slice(0, end).trim(), rest: trimmed.slice(end) };
+  }
+  if (trimmed.length >= maxChunk) {
+    const splitAt = trimmed.lastIndexOf(' ', maxChunk);
+    if (splitAt > 24) {
+      return { chunk: trimmed.slice(0, splitAt).trim(), rest: trimmed.slice(splitAt + 1) };
+    }
+  }
+  if (force && trimmed.length) {
+    return { chunk: trimmed, rest: '' };
+  }
+  return { chunk: null, rest: trimmed };
+}
+
 wss.on('connection', (clientWs) => {
   const traceId = `trace_${Math.random().toString(16).slice(2)}`;
   const startedAt = nowMs();
@@ -112,13 +147,16 @@ wss.on('connection', (clientWs) => {
   let accumulatedText = '';
   let responseId: string | undefined;
   let lastTranscript = '';
-  let speakingAbort: AbortController | null = null;
   let bufferedAudioMs = 0;
   const pendingAudio: string[] = [];
   let pendingCommit: { instructions?: string } | null = null;
   const pendingText: string[] = [];
   const pcmChunks: Buffer[] = [];
   let startInstructions: string | null = null;
+  let turnInFlight = false;
+  let generationAbort: AbortController | null = null;
+  let speakingAbort: AbortController | null = null;
+  let activeTurnId = 0;
 
   function log(obj: Record<string, unknown>) {
     console.log(JSON.stringify({ traceId, ...obj }));
@@ -263,6 +301,108 @@ wss.on('connection', (clientWs) => {
     safeSend(clientWs, { type: 'error', error: 'Realtime backend connection error' });
   });
 
+  const cancelActiveTurn = (reason: string) => {
+    if (generationAbort) {
+      generationAbort.abort();
+      generationAbort = null;
+    }
+    if (speakingAbort) {
+      speakingAbort.abort();
+      speakingAbort = null;
+    }
+    turnInFlight = false;
+    log({ stage: 'turn_canceled', reason });
+  };
+
+  const runTurn = (inputText: string, guidance?: string) => {
+    if (turnInFlight) {
+      log({ stage: 'turn_ignored_in_flight' });
+      return;
+    }
+    const text = inputText.trim();
+    if (!text) return;
+
+    turnInFlight = true;
+    const turnId = ++activeTurnId;
+    const generationCtl = new AbortController();
+    const speakingCtl = new AbortController();
+    generationAbort = generationCtl;
+    speakingAbort = speakingCtl;
+
+    let ttsRemainder = '';
+    const ttsQueue: string[] = [];
+    let ttsWorker: Promise<void> | null = null;
+
+    const flushTtsQueue = () => {
+      if (!ttsWorker) {
+        ttsWorker = (async () => {
+          while (ttsQueue.length && !speakingCtl.signal.aborted) {
+            const next = ttsQueue.shift();
+            if (!next) continue;
+            await speakViaHttpTts(next, OUTPUT_SAMPLE_RATE, speakingCtl.signal, (b64) => {
+              safeSend(clientWs, { type: 'audio_delta', audio: b64 });
+            });
+          }
+          ttsWorker = null;
+        })();
+      }
+      return ttsWorker;
+    };
+
+    const enqueueSpeakable = (incoming: string, force = false) => {
+      if (incoming) {
+        ttsRemainder += incoming;
+      }
+      while (true) {
+        const { chunk, rest } = takeSpeakableChunk(ttsRemainder, force);
+        ttsRemainder = rest;
+        if (!chunk) break;
+        ttsQueue.push(chunk);
+      }
+      void flushTtsQueue();
+    };
+
+    (async () => {
+      try {
+        const finalText = await runOpenClawAgentStreaming(
+          text,
+          (delta) => {
+            safeSend(clientWs, { type: 'text_delta', text: delta });
+            enqueueSpeakable(delta, false);
+          },
+          {
+            extraGuidance: guidance,
+            signal: generationCtl.signal,
+          }
+        );
+
+        enqueueSpeakable('', true);
+        if (ttsRemainder.trim()) {
+          ttsQueue.push(ttsRemainder.trim());
+          ttsRemainder = '';
+        }
+        await flushTtsQueue();
+        if (ttsWorker) {
+          await ttsWorker;
+        }
+        safeSend(clientWs, { type: 'text_completed', text: finalText });
+        safeSend(clientWs, { type: 'response_completed', responseId: `openclaw_${Date.now()}` });
+      } catch (e) {
+        if (!isAbortError(e)) {
+          safeSend(clientWs, { type: 'error', error: e instanceof Error ? e.message : String(e) });
+        } else {
+          log({ stage: 'turn_aborted' });
+        }
+      } finally {
+        if (activeTurnId === turnId) {
+          turnInFlight = false;
+          generationAbort = null;
+          speakingAbort = null;
+        }
+      }
+    })();
+  };
+
   clientWs.on('message', (data) => {
     let msg: ClientMsg;
     try {
@@ -316,13 +456,13 @@ wss.on('connection', (clientWs) => {
         if (bufferedAudioMs < 100) {
           safeSend(clientWs, { type: 'error', error: `Audio buffer too small (${bufferedAudioMs.toFixed(0)}ms). Speak a bit longer.` });
           bufferedAudioMs = 0;
+          pcmChunks.splice(0, pcmChunks.length);
           return;
         }
 
-        // Cancel any in-flight speech (barge-in).
-        if (speakingAbort) {
-          speakingAbort.abort();
-          speakingAbort = null;
+        if (turnInFlight) {
+          log({ stage: 'commit_ignored_turn_in_flight' });
+          return;
         }
 
         // Optional per-turn instruction override affects transcription context.
@@ -351,23 +491,7 @@ wss.on('connection', (clientWs) => {
               return;
             }
             safeSend(clientWs, { type: 'transcript', text: transcript });
-
-            const agentText = await runOpenClawAgentStreaming(
-              transcript,
-              (delta) => {
-                safeSend(clientWs, { type: 'text_delta', text: delta });
-              },
-              {
-                extraGuidance: msg.instructions?.trim() || startInstructions || undefined,
-              }
-            );
-            safeSend(clientWs, { type: 'text_completed', text: agentText });
-
-            speakingAbort = new AbortController();
-            await speakViaHttpTts(agentText, OUTPUT_SAMPLE_RATE, speakingAbort.signal, (b64) => {
-              safeSend(clientWs, { type: 'audio_delta', audio: b64 });
-            });
-            safeSend(clientWs, { type: 'response_completed', responseId: `openclaw_${Date.now()}` });
+            runTurn(transcript, msg.instructions?.trim() || startInstructions || undefined);
           } catch (e) {
             safeSend(clientWs, { type: 'error', error: e instanceof Error ? e.message : String(e) });
           }
@@ -381,31 +505,11 @@ wss.on('connection', (clientWs) => {
         accumulatedText = '';
         responseId = undefined;
 
-        // Cancel any in-flight speech.
-        if (speakingAbort) {
-          speakingAbort.abort();
-          speakingAbort = null;
-        }
-
         setTimeout(async () => {
           const text = (msg.text || '').trim();
           if (!text) return;
           try {
-            const agentText = await runOpenClawAgentStreaming(
-              text,
-              (delta) => {
-                safeSend(clientWs, { type: 'text_delta', text: delta });
-              },
-              {
-                extraGuidance: startInstructions || undefined,
-              }
-            );
-            safeSend(clientWs, { type: 'text_completed', text: agentText });
-            speakingAbort = new AbortController();
-            await speakViaHttpTts(agentText, OUTPUT_SAMPLE_RATE, speakingAbort.signal, (b64) => {
-              safeSend(clientWs, { type: 'audio_delta', audio: b64 });
-            });
-            safeSend(clientWs, { type: 'response_completed', responseId: `openclaw_${Date.now()}` });
+            runTurn(text, startInstructions || undefined);
           } catch (e) {
             safeSend(clientWs, { type: 'error', error: e instanceof Error ? e.message : String(e) });
           }
@@ -413,7 +517,13 @@ wss.on('connection', (clientWs) => {
         return;
       }
 
+      case 'interrupt': {
+        cancelActiveTurn('client_interrupt');
+        return;
+      }
+
       case 'end': {
+        cancelActiveTurn('client_end');
         try {
           openaiWs.close();
         } catch {}
@@ -427,6 +537,7 @@ wss.on('connection', (clientWs) => {
 
   clientWs.on('close', () => {
     log({ stage: 'client_close', ms: nowMs() - startedAt });
+    cancelActiveTurn('client_close');
     try {
       openaiWs.close();
     } catch {}
@@ -434,6 +545,7 @@ wss.on('connection', (clientWs) => {
 
   clientWs.on('error', (err) => {
     log({ stage: 'client_error', err: String(err) });
+    cancelActiveTurn('client_error');
     try {
       openaiWs.close();
     } catch {}
@@ -443,7 +555,7 @@ wss.on('connection', (clientWs) => {
 async function runOpenClawAgentStreaming(
   inputText: string,
   onDelta: (delta: string) => void,
-  options?: { extraGuidance?: string }
+  options?: { extraGuidance?: string; signal?: AbortSignal }
 ): Promise<string> {
   const base = gatewayHttpBase();
   if (!base) throw new Error('OPENCLAW_GATEWAY_URL is not set');
@@ -492,6 +604,7 @@ async function runOpenClawAgentStreaming(
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
+    signal: options?.signal,
   });
 
   if (!res.ok || !res.body) {
@@ -506,6 +619,9 @@ async function runOpenClawAgentStreaming(
   let full = '';
 
   while (true) {
+    if (options?.signal?.aborted) {
+      throw new DOMException('Aborted', 'AbortError');
+    }
     const { value, done } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
@@ -537,7 +653,7 @@ async function runOpenClawAgentStreaming(
             ? evt.delta
             : evt?.type === 'response.text.delta'
               ? evt.delta
-              : evt?.delta;
+              : undefined;
 
         if (typeof delta === 'string' && delta.length) {
           full += delta;
@@ -632,7 +748,7 @@ async function speakViaHttpTts(
     },
     body: JSON.stringify({
       model: ttsModel,
-      voice: REALTIME_VOICE,
+      voice: TTS_VOICE,
       input: text,
       // /v1/audio/speech expects "pcm" (not "pcm16").
       format: 'pcm',
